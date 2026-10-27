@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { resolveApiBase } from './lib/apiBase';
+import { DEMO_CODE, DEMO_INVITE_CODE, demoModeEnabled, demoRequest, resetDemo, setDemoMode } from './lib/demo';
 import {
   isAdult,
   validateAftercarePlan,
@@ -91,7 +93,11 @@ const REWARD_LINES: Record<string, string> = {
 };
 
 async function api(path: string, token: string | null, body?: unknown, method?: string) {
-  const res = await fetch(path, {
+  if (demoModeEnabled()) {
+    return demoRequest(path, method ?? (body ? 'POST' : 'GET'), body);
+  }
+  const base = resolveApiBase(import.meta.env.VITE_API_URL);
+  const res = await fetch(`${base}${path}`, {
     body: body ? JSON.stringify(body) : undefined,
     headers: {
       'Content-Type': 'application/json',
@@ -107,6 +113,7 @@ async function api(path: string, token: string | null, body?: unknown, method?: 
 export default function App() {
   const [view, setView] = useState<View>('landing');
   const [token, setToken] = useState<string | null>(() => localStorage.getItem('dd_token'));
+  const [demoMode, setDemoModeState] = useState<boolean>(() => demoModeEnabled());
   const [profile, setProfile] = useState<Profile | null>(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -974,11 +981,12 @@ export default function App() {
           <div className="den-door-panel">🚪 {denCue}</div>
         </div>
       )}
-      {view !== 'landing' && (
+      <header className="topbar">
+        <span className="brand">Den &amp; Desk</span>
         <button className="quick-exit" onClick={quickExit}>
           Quick exit
         </button>
-      )}
+      </header>
 
       {view === 'landing' && (
         <>
@@ -989,9 +997,6 @@ export default function App() {
             Owners get a Desk. Everyone gets discovery, messaging, trust
             badges, and safety tools that stay free.
           </p>
-          <button className="quick-exit" onClick={quickExit}>
-            Quick exit
-          </button>
           <div className="card">
             <h2>Join with an invite code</h2>
             <p className="small">
@@ -1007,13 +1012,33 @@ export default function App() {
               Sign in with Apple (private relay email) is planned as an
               optional extra and is not enabled in Phase 0.
             </p>
-            <button disabled>Sign in with Apple (not enabled yet)</button>
+            <button className="planned" disabled>Sign in with Apple (not enabled yet)</button>
+            <p className="small">Planned for later — intentionally inactive for now, not broken.</p>
             <p className="small">
               Warning: if you ever use Google, use a separate Google
               account if this identity is private — Google accounts are
               usually tied to a real identity.
             </p>
-            <button disabled>Sign in with Google (not enabled yet)</button>
+            <button className="planned" disabled>Sign in with Google (not enabled yet)</button>
+            <p className="small">Planned for later — intentionally inactive for now, not broken.</p>
+          </div>
+          <div className="card demo-card">
+            <h2>Test/dev demo — try it without a live service</h2>
+            <p className="small">
+              Testing only: this is not a real account. Demo data stays in
+              this browser, is clearly marked as demo, and can be reset
+              with one button. Nothing is sent anywhere in demo mode.
+            </p>
+            {demoMode ? (
+              <>
+                <p><strong>Demo mode is ON.</strong> Invite code: <strong>{DEMO_INVITE_CODE}</strong> · Demo login code: <strong>{DEMO_CODE}</strong></p>
+                <button onClick={() => { resetDemo(); localStorage.removeItem('dd_token'); setToken(null); setProfile(null); setView('landing'); }}>Reset demo data</button>
+                <button onClick={() => { setDemoMode(false); setDemoModeState(false); localStorage.removeItem('dd_token'); setToken(null); setProfile(null); setView('landing'); }}>Turn demo mode off</button>
+              </>
+            ) : (
+              <button onClick={() => { setDemoMode(true); setDemoModeState(true); setView('landing'); }}>Turn on test/dev demo</button>
+            )}
+            {notice && <p>{notice}</p>}
           </div>
         </>
       )}
@@ -1041,6 +1066,9 @@ export default function App() {
         <>
           <h1>Sign in with an email code</h1>
           <p className="small">No password to leak. Codes expire in 10 minutes.</p>
+          {demoMode && (
+            <p className="demo-banner"><strong>Demo mode is ON — testing only, not a real account.</strong> Use invite code <strong>{DEMO_INVITE_CODE}</strong> and demo code <strong>{DEMO_CODE}</strong>. Nothing is sent anywhere.</p>
+          )}
           {error && <p className="error">{error}</p>}
           {notice && <p>{notice}</p>}
           <label>
@@ -1117,6 +1145,13 @@ export default function App() {
             {profile.displayName} · {profile.role}
             {profile.petType ? ` · ${profile.petType}` : ''}
           </p>
+          {demoMode && (
+            <div className="demo-banner">
+              <strong>DEMO MODE — test data only, stored in this browser.</strong> This is not a real account.
+              <button onClick={() => { resetDemo(); localStorage.removeItem('dd_token'); setToken(null); setProfile(null); setView('landing'); }}>Reset demo data</button>
+              <button onClick={() => { setDemoMode(false); setDemoModeState(false); localStorage.removeItem('dd_token'); setToken(null); setProfile(null); setView('landing'); }}>Exit demo</button>
+            </div>
+          )}
           {error && <p className="error">{error}</p>}
           {notice && <p>{notice}</p>}
           <div className="card">

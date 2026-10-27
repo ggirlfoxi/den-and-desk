@@ -1,15 +1,34 @@
 :root { color-scheme: light; font-family: system-ui, sans-serif; }
-body { margin: 0; background: #faf6ef; color: #2b2320; }
-main { max-width: 720px; margin: 0 auto; padding: 2rem 1rem 4rem; }
-button { cursor: pointer; padding: 0.6rem 1rem; border-radius: 0.5rem; border: 1px solid #6b4f3a; background: #fff; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #faf6ef; color: #2b2320; overflow-x: hidden; }
+main { width: min(720px, 100%); margin: 0 auto; padding: 1.25rem 1rem 4rem; overflow-wrap: anywhere; }
+h1 { font-size: clamp(1.7rem, 7vw, 2.4rem); line-height: 1.15; overflow-wrap: anywhere; word-break: break-word; }
+h2 { font-size: clamp(1.25rem, 5.5vw, 1.6rem); line-height: 1.25; overflow-wrap: anywhere; word-break: break-word; }
+h3, h4 { overflow-wrap: anywhere; word-break: break-word; }
+p { line-height: 1.5; }
+button { cursor: pointer; padding: 0.6rem 1rem; border-radius: 0.5rem; border: 1px solid #6b4f3a; background: #fff; max-width: 100%; white-space: normal; text-align: center; }
 button:disabled { opacity: 0.55; cursor: not-allowed; }
-input, select, textarea { display: block; width: 100%; margin: 0.25rem 0 1rem; padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #c9b8a8; }
+/* Planned sign-in options are intentionally inactive, not broken:
+   dashed border + muted fill, full opacity, with a note in the UI. */
+button.planned { opacity: 1; background: #f3ece2; color: #6b5d52; border-style: dashed; cursor: not-allowed; }
+input, select, textarea { display: block; width: 100%; margin: 0.25rem 0 1rem; padding: 0.6rem; border-radius: 0.5rem; border: 1px solid #c9b8a8; font-size: 1rem; }
+input[type="checkbox"], input[type="range"] { display: inline-block; width: auto; margin: 0 0.5rem 0 0; vertical-align: middle; }
+input[type="range"] { width: 100%; }
 label { font-weight: 600; }
-.quick-exit { position: fixed; top: 0.75rem; right: 0.75rem; z-index: 10; background: #7a2e2e; color: #fff; border-color: #7a2e2e; }
-.card { background: #fff; border: 1px solid #e5d9c8; border-radius: 1rem; padding: 1.25rem; margin: 1rem 0; }
+/* Top bar: Quick exit sits in its own flex row with the brand, never
+   fixed over a heading. This is the fix for the phone screenshot
+   where Quick exit overlapped "Join with an invite code". */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.brand { font-weight: 800; font-size: 1.05rem; overflow-wrap: anywhere; }
+.quick-exit { position: static; flex: none; white-space: nowrap; background: #7a2e2e; color: #fff; border-color: #7a2e2e; }
+.card { background: #fff; border: 1px solid #e5d9c8; border-radius: 1rem; padding: 1.25rem; margin: 1rem 0; overflow-wrap: anywhere; }
+.card > div { overflow-wrap: anywhere; }
+.card button { margin: 0.25rem 0.25rem 0.25rem 0; }
 .error { color: #7a2e2e; }
-.den-door { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(43, 35, 32, 0.55); }
-.den-door-panel { background: #fff8ee; border: 1px solid #6b4f3a; border-radius: 1rem; padding: 1.5rem 2rem; font-size: 1.1rem; animation: denopen 0.9s ease-out; }
+.demo-banner { background: #fff3cd; border: 1px solid #c9a227; border-radius: 0.75rem; padding: 0.9rem 1rem; margin: 0 0 1rem; }
+.demo-card { border-style: dashed; }
+.den-door { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(43, 35, 32, 0.55); padding: 1rem; }
+.den-door-panel { background: #fff8ee; border: 1px solid #6b4f3a; border-radius: 1rem; padding: 1.5rem 2rem; font-size: 1.1rem; max-width: 90vw; animation: denopen 0.9s ease-out; }
 @keyframes denopen { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .den-door-panel { animation: none; } }
 .lost-poster { border: 2px solid #7a2e2e; border-radius: 0.75rem; padding: 1rem; margin: 0.75rem 0; background: #fffdf6; animation: posterpulse 2.4s ease-in-out infinite; }
@@ -17,3 +36,14 @@ label { font-weight: 600; }
 .game-board { border: 1px dashed #6b4f3a; border-radius: 0.75rem; padding: 1rem; margin: 0.75rem 0; background: #f3ece2; }
 @media (prefers-reduced-motion: reduce) { .lost-poster { animation: none; } }
 .small { font-size: 0.9rem; color: #6b5d52; }
+/* Narrow phones (320–430px): full-width buttons, tighter padding,
+   no horizontal scroll. Verified by CSS review at 320, 360, 390,
+   and 430px — no headless browser was available in this environment,
+   so no screenshot is claimed. */
+@media (max-width: 480px) {
+  main { padding: 1rem 0.75rem 3rem; }
+  .card { padding: 1rem; }
+  button { width: 100%; margin-left: 0; margin-right: 0; }
+  .quick-exit { width: auto; }
+  .topbar { gap: 0.5rem; }
+}
