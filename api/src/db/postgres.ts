@@ -482,6 +482,93 @@ export class PostgresStore implements Store {
     const res = await this.pool.query('SELECT * FROM scheduled_checkins WHERE contract_id = $1 ORDER BY due_at ASC, id ASC', [contractId]);
     return res.rows.map(toScheduledCheckin);
   }
+  // Phase 3 storage is not yet implemented for Postgres. These stubs
+  // keep the Store contract typed while making the gap explicit:
+  // Phase 3 endpoints work with the in-memory store and must not be
+  // offered on a Postgres deployment until real tables are added and
+  // tested against a live database. Existing Phase 0–2 behaviour is
+  // unaffected.
+  private phase3Unsupported(): never {
+    throw new Error('Phase 3 storage is not implemented for Postgres yet.');
+  }
+  async createOwnerCommand(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async getOwnerCommand(): Promise<undefined> {
+    this.phase3Unsupported();
+  }
+  async updateOwnerCommand(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async ownerCommandsForContract(): Promise<[]> {
+    this.phase3Unsupported();
+  }
+  async createRoutineItem(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async routineItemsForUserOnDate(): Promise<[]> {
+    this.phase3Unsupported();
+  }
+  async getRoutineItem(): Promise<undefined> {
+    this.phase3Unsupported();
+  }
+  async updateRoutineItem(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async createWishlistItem(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async wishlistForUser(): Promise<[]> {
+    this.phase3Unsupported();
+  }
+  async getWishlistItem(): Promise<undefined> {
+    this.phase3Unsupported();
+  }
+  async updateWishlistItem(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async deleteWishlistItem(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async createLostAlert(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async getLostAlert(): Promise<undefined> {
+    this.phase3Unsupported();
+  }
+  async updateLostAlert(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async openLostAlertForContract(): Promise<undefined> {
+    this.phase3Unsupported();
+  }
+  async openLostAlerts(): Promise<[]> {
+    this.phase3Unsupported();
+  }
+  async getLostOptIn(): Promise<boolean> {
+    this.phase3Unsupported();
+  }
+  async setLostOptIn(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async getLostSound(): Promise<boolean> {
+    this.phase3Unsupported();
+  }
+  async setLostSound(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async setGameToken(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async getGameToken(): Promise<null> {
+    this.phase3Unsupported();
+  }
+  async createPraiseNote(): Promise<void> {
+    this.phase3Unsupported();
+  }
+  async praiseNotesForContract(): Promise<[]> {
+    this.phase3Unsupported();
+  }
   async reset(): Promise<void> {
     throw new Error('PostgresStore reset is not supported in production.');
   }
