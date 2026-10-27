@@ -443,3 +443,16 @@ not used here, and no token or secret is in this code or its history.
 8. Who gets the first invite codes, and how long the beta gate stays on.
 9. GitHub remote creation (see "Publishing to GitHub" — not done,
    needs a signed-in GitHub account, not the haven-only token).
+
+## Test/dev demo mode (2026-10-26, frontend only)
+
+The Pages frontend has a clearly labelled test/dev demo, OFF by
+default, so the site can be tried without a live API, database, or
+email. Turn it on from the dashed "Test/dev demo — try it without a
+live service" card on the landing page, then use invite code `TEST`
+and demo code `123456`. Demo data stays in the browser only, is
+clearly marked as demo, and can be reset with one button. Demo mode
+is testing only — it is not a real account, and real mode stays
+invite-only with the 18+ declaration gate. Cloudflare Pages GitHub
+App access (2026-10-26): selected repositories are ggirlfoxi/haven
+and ggirlfoxi/den-and-desk only, not all repositories.
