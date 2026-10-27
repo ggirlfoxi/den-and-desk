@@ -1,10 +1,92 @@
-# Den & Desk — Phase 2 (working name)
+# Den & Desk — Phase 3 (working name)
 
 **For consenting adults in roleplay.**
 
-Phase 2 is built locally on top of Phase 1. Nothing is deployed,
+Phase 3 is built locally on top of Phase 2. Nothing is deployed,
 published to GitHub, or opened to registration. See "Hosting status"
 and "Publishing to GitHub" below for the exact blockers.
+
+## What Phase 3 adds
+
+- **Pet routine + owner commands**: owner commands on active
+  contracts only — Come home, Bedtime, Cage time (framed as cozy
+  den / quiet time, never confinement punishment), Eat, Walk, Potty
+  break. The pet answers Done, Need help, or Pass (excused). A daily
+  pet-care routine template — Eat, Walk, Potty, Nap, Play — as
+  checkable items for the day, with Pass excused and no streak
+  pressure. Commands never override a safeword, pause, block, or
+  contract end.
+- **Den login animation (frontend only)**: on successful email-code
+  login, a short den-door opening (under 1 second, no sound by
+  default, instant if prefers-reduced-motion is set), with a
+  different short cue for Owner ("The Desk opens the Den.") vs Pet
+  ("Welcome home to the Den."). No new data stored, no auth change.
+- **Gear wishlist (no purchases)**: add, view, and remove items from
+  a fixed list (collar, leash, outfit, den/cage, toy, other) plus a
+  free-text label. No prices, no checkout, no external shop links,
+  no payment. Private by default; a contract partner sees only
+  items the user chose to share.
+- **Safe lost-pet mode (safety-critical, read this carefully)**:
+  lost mode is separately opt-in by the pet — an owner can only
+  start it when the pet has opted in, and a pet turning it on
+  themselves counts as opting in. The pet can end it instantly
+  (check in as home, turn it off, safeword, contract pause/end, or
+  turn opt-in off, which closes open alerts at once). A "Lost pets"
+  board lists lost pets by pseudonym and pet type only, plus a
+  general-area label the user typed themselves (never a street
+  address — an address-looking value is rejected — never a precise
+  location, never auto-detected). **No browser geolocation, GPS,
+  watchPosition, or real-distance calculation anywhere in this
+  phase.** A helper's only actions are in-app: "I think I found
+  them" marks the alert found in-app and sends an in-app message to
+  the original owner only; the helper gets no location, phone, or
+  private detail, and is never told to meet the pet in person.
+  "Brought home" / "transported home" means only: found marked
+  in-app, owner confirmed, pet checked in as home. The original
+  owner, or the pet themselves, is the only person who physically
+  moves the pet, and only if already agreed separately. Lost alerts
+  are never public outside registered, logged-in users, never
+  indexed, and blocked pairs cannot see or message about each
+  other's alerts.
+- **Digital lost poster**: when lost mode is on, each board entry is
+  a poster card — "LOST — Please find my cat/dog" — with pseudonym
+  and pet type only, the general-area label, the distinct app sound
+  option, and a reward line. Reward options are only: a Good Finder
+  badge/sticker in-app, a thank-you note, a treat for the finder's
+  own pet, or a wishlist gift between people who already know each
+  other. No cash, no payment, no real contact details on the poster.
+  No QR or tag links to a real identity. The poster pulses gently
+  on the board and on the stylised in-app game board (not a real
+  street map, not a real-world dot); with prefers-reduced-motion it
+  is static.
+- **Proximity sound in game mode only**: users check into an
+  in-game play area by typing its label, or move their game token
+  to another label. When a finder and a lost pet are in the same
+  play-area label, the finder's phone can play the distinct app
+  sound — but only while lost-game mode is on, only when the pet
+  has not muted it (pet-controlled, mutable at any time), and only
+  when the finder's own device toggle is on. The sound is a short
+  synthesised in-app notification tone, played only on a button
+  press, never autoplayed, never broadcast in public by default,
+  and never triggered by real location.
+- **Caught protocol (shown in the lost-mode UI)**: DO ask first
+  in-app, respect the safeword instantly, stop if the pet is out of
+  headspace or distressed, contact the original owner in-app first,
+  and let the original owner confirm. DO NOT follow, touch without
+  consent, share a photo or location, approach a pet who is alone
+  and distressed, or transport a person in a vehicle.
+- **Good/bad praise (private)**: within an active contract, the
+  owner can send a praise note ("Good kitten", "Good dog") or a
+  gentle correction note. Notes are private between the pair, no
+  public shaming, no financial punishment, and safeword / pause /
+  block still override everything.
+- **Phase 3 Postgres gap (stated plainly)**: the Postgres adapter
+  implements Phase 3 storage as explicit stubs that throw "Phase 3
+  storage is not implemented for Postgres yet". Phase 3 endpoints
+  work with the in-memory store and must NOT be offered on a
+  Postgres deployment until real tables are added and tested
+  against a live database. Phase 0–2 Postgres behaviour is
+  unaffected.
 
 ## What Phase 2 adds
 
