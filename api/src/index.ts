@@ -2,6 +2,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { generateCode, hashCode, isAdult, signToken, verifyToken } from './auth';
+import { isSmtpConfigured, sendLoginCode } from './email';
 import { PostgresStore } from './db/postgres';
 import {
   InMemoryStore,
@@ -107,21 +108,48 @@ export function createApp(store: Store) {
       return;
     }
     const code = generateCode();
-    await store.setCode({
-      attempts: 0,
-      codeHash: hashCode(code),
-      email,
-      expiresAt: Date.now() + 10 * 60 * 1000,
-      inviteCode,
-    });
-    // Real email delivery is not wired in Phase 0 (no SMTP provider was
-    // chosen or paid for). In development the code is logged and, only
-    // with ALLOW_DEV_CODE=true, returned so the flow can be tested.
-    console.log(`[den-and-desk] email code requested for ${email} (delivery not wired in Phase 0)`);
-    res.json({
-      message: 'If this email is eligible, a code was sent.',
-      ok: true,
-      ...(allowDevCode ? { devCode: code } : {}),
+    // Email delivery (test/dev build): SMTP only, driven by SMTP_* env
+    // vars, with no provider chosen or paid for. If SMTP is configured,
+    // the code is sent by email and never returned in the response and
+    // never logged. If SMTP is not configured, the ONLY fallback is the
+    // explicit local-dev path (ALLOW_DEV_CODE=true, never in
+    // production) used by tests; otherwise this fails loudly with 503
+    // and no code is stored, sent, or logged. FREE-ONLY / PAYMENT GATE:
+    // if any SMTP route asks for payment, stop and report it blocked.
+    if (isSmtpConfigured()) {
+      try {
+        await sendLoginCode(email, code);
+      } catch {
+        res.status(503).json({ error: 'Email delivery failed. Please try again later. No code was sent.' });
+        return;
+      }
+      await store.setCode({
+        attempts: 0,
+        codeHash: hashCode(code),
+        email,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+        inviteCode,
+      });
+      res.json({ message: 'If this email is eligible, a code was sent.', ok: true });
+      return;
+    }
+    if (allowDevCode && process.env.NODE_ENV !== 'production') {
+      await store.setCode({
+        attempts: 0,
+        codeHash: hashCode(code),
+        email,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+        inviteCode,
+      });
+      res.json({
+        message: 'If this email is eligible, a code was sent.',
+        ok: true,
+        devCode: code,
+      });
+      return;
+    }
+    res.status(503).json({
+      error: 'Email delivery is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM before codes can be sent. No code was sent and no code was logged.',
     });
   });
 
@@ -2027,6 +2055,436 @@ export function createApp(store: Store) {
       return;
     }
     res.json({ notes: await store.praiseNotesForContract(contract.id) });
+  });
+
+  // ---- Pet-sitting (test/dev build): temporary, bounded sits ----
+  // A sit is NOT a transfer of the main contract and never carries a
+  // home address or keys — those fields do not exist here, by design.
+  // The sitter only runs day-to-day routine / commands / check-ins
+  // inside the app, for the agreed window only. Both the original
+  // owner AND the pet must agree before a sit starts. The original
+  // owner can reclaim instantly, the pet can pause or end instantly,
+  // and control auto-returns when the window ends (lazy expiry on
+  // every read or action). A sitter cannot change the main contract
+  // (they are not a participant in it, so contract endpoints 403),
+  // cannot extend a sit (no extend endpoint exists), and cannot
+  // contact the pet after it ends unless the pet agrees separately
+  // (sitting actions stop at end/expiry). Blocked pairs cannot sit
+  // for each other; owner reclaim and pet pause/end still work even
+  // if a block appears, because ending is an escape, not a continuation.
+  // 18+ only: every user here passed the 18+ signup gate, and every
+  // endpoint below requires auth. TEST/DEV ONLY — not a production
+  // launch, not for real users, no invites sent from this build.
+  const SITTING_COMMAND_KINDS = ['Come home', 'Bedtime', 'Cage time', 'Eat', 'Walk', 'Potty break'];
+  async function loadSitting(res: Response, id: string, userId: string) {
+    const sitting = await store.getSitting(id);
+    if (!sitting) {
+      res.status(404).json({ error: 'That sitting request was not found.' });
+      return null;
+    }
+    if (sitting.ownerUserId !== userId && sitting.petUserId !== userId && sitting.sitterUserId !== userId) {
+      res.status(403).json({ error: 'That sitting request is not yours.' });
+      return null;
+    }
+    if ((sitting.status === 'active' || sitting.status === 'paused' || sitting.status === 'awaiting-agreement' || sitting.status === 'requested') && Date.now() > sitting.endsAt) {
+      sitting.status = 'expired';
+      sitting.endedReason = 'expired';
+      sitting.endedAt = Date.now();
+      await store.updateSitting(sitting);
+    }
+    return sitting;
+  }
+  async function sittingBlocked(sitting: { ownerUserId: string; petUserId: string; sitterUserId: string | null }): Promise<boolean> {
+    if (await blockedEitherWay(sitting.ownerUserId, sitting.petUserId)) return true;
+    if (sitting.sitterUserId && (await blockedEitherWay(sitting.ownerUserId, sitting.sitterUserId) || await blockedEitherWay(sitting.petUserId, sitting.sitterUserId))) return true;
+    return false;
+  }
+
+  app.post('/api/v1/sittings', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const { baseContractId, endsAt, limits, routineSummary, safewordNote, startsAt } = req.body as Record<string, unknown>;
+    if (typeof baseContractId !== 'string') {
+      res.status(400).json({ error: 'A base contract id is required.' });
+      return;
+    }
+    const contract = await loadContract(res, baseContractId, userId);
+    if (!contract) return;
+    if (contract.status !== 'active') {
+      res.status(400).json({ error: 'A sitting request needs an active base contract.' });
+      return;
+    }
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot post a sitting request with someone you are blocked from.' });
+      return;
+    }
+    if (!(await isOwnerRole(userId))) {
+      res.status(403).json({ error: 'Only the original owner can post a sitting request.' });
+      return;
+    }
+    const start = typeof startsAt === 'number' ? startsAt : Number.NaN;
+    const end = typeof endsAt === 'number' ? endsAt : Number.NaN;
+    if (Number.isNaN(start) || Number.isNaN(end) || end <= start) {
+      res.status(400).json({ error: 'A sitting window needs a start and a later end time.' });
+      return;
+    }
+    if (end - start > 30 * 24 * 60 * 60 * 1000) {
+      res.status(400).json({ error: 'A sitting window must be 30 days or shorter.' });
+      return;
+    }
+    const routineText = typeof routineSummary === 'string' ? routineSummary.trim() : '';
+    if (routineText.length < 1 || routineText.length > 500) {
+      res.status(400).json({ error: 'A routine summary of 1 to 500 characters is required.' });
+      return;
+    }
+    const limitsText = typeof limits === 'string' ? limits.trim() : '';
+    if (limitsText.length > 2000) {
+      res.status(400).json({ error: 'Limits must be 2000 characters or fewer.' });
+      return;
+    }
+    const safewordText = typeof safewordNote === 'string' ? safewordNote.trim() : '';
+    if (safewordText.length > 200) {
+      res.status(400).json({ error: 'Safeword note must be 200 characters or fewer.' });
+      return;
+    }
+    const sitting = {
+      agreedUserIds: [] as string[],
+      badgeAwarded: false,
+      baseContractId: contract.id,
+      createdAt: Date.now(),
+      endedAt: null,
+      endedReason: null,
+      endsAt: end,
+      handoverReport: '',
+      id: newId('sitting'),
+      limits: limitsText,
+      notes: [] as { createdAt: number; text: string; userId: string }[],
+      ownerUserId: userId,
+      petUserId: otherParty(contract, userId),
+      routineSummary: routineText,
+      safewordNote: safewordText,
+      sitterUserId: null,
+      startsAt: start,
+      status: 'requested' as const,
+    };
+    await store.createSitting(sitting);
+    res.status(201).json({ sitting });
+  });
+
+  app.get('/api/v1/sittings', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sittings = await store.sittingsForUser(userId);
+    for (const sitting of sittings) {
+      if ((sitting.status === 'active' || sitting.status === 'paused' || sitting.status === 'awaiting-agreement' || sitting.status === 'requested') && Date.now() > sitting.endsAt) {
+        sitting.status = 'expired';
+        sitting.endedReason = 'expired';
+        sitting.endedAt = Date.now();
+        await store.updateSitting(sitting);
+      }
+    }
+    res.json({ sittings });
+  });
+
+  app.get('/api/v1/sittings/:id', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/apply', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await store.getSitting(req.params.id);
+    if (!sitting) {
+      res.status(404).json({ error: 'That sitting request was not found.' });
+      return;
+    }
+    if (sitting.ownerUserId === userId || sitting.petUserId === userId) {
+      res.status(400).json({ error: 'The owner and pet cannot apply to sit for themselves.' });
+      return;
+    }
+    if (sitting.status !== 'requested') {
+      res.status(400).json({ error: 'That sitting request is no longer open for applications.' });
+      return;
+    }
+    if (await blockedEitherWay(userId, sitting.ownerUserId) || await blockedEitherWay(userId, sitting.petUserId)) {
+      res.status(403).json({ error: 'You cannot sit for someone you are blocked from.' });
+      return;
+    }
+    sitting.sitterUserId = userId;
+    sitting.status = 'awaiting-agreement';
+    await store.updateSitting(sitting);
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/agree', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.ownerUserId !== userId && sitting.petUserId !== userId) {
+      res.status(403).json({ error: 'Only the original owner and the pet can agree to a sit.' });
+      return;
+    }
+    if (sitting.status !== 'awaiting-agreement') {
+      res.status(400).json({ error: 'That sitting is not awaiting agreement.' });
+      return;
+    }
+    if (await sittingBlocked(sitting)) {
+      res.status(403).json({ error: 'You cannot agree to a sit with someone you are blocked from.' });
+      return;
+    }
+    if (!sitting.agreedUserIds.includes(userId)) sitting.agreedUserIds.push(userId);
+    if (sitting.agreedUserIds.includes(sitting.ownerUserId) && sitting.agreedUserIds.includes(sitting.petUserId)) {
+      sitting.status = 'active';
+    }
+    await store.updateSitting(sitting);
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/pause', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.petUserId !== userId) {
+      res.status(403).json({ error: 'Only the pet can pause a sit.' });
+      return;
+    }
+    if (sitting.status !== 'active') {
+      res.status(400).json({ error: 'Only an active sit can be paused.' });
+      return;
+    }
+    sitting.status = 'paused';
+    await store.updateSitting(sitting);
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/resume', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.petUserId !== userId) {
+      res.status(403).json({ error: 'Only the pet can resume a paused sit.' });
+      return;
+    }
+    if (sitting.status !== 'paused') {
+      res.status(400).json({ error: 'Only a paused sit can be resumed.' });
+      return;
+    }
+    if (await sittingBlocked(sitting)) {
+      res.status(403).json({ error: 'You cannot resume a sit with someone you are blocked from.' });
+      return;
+    }
+    sitting.status = 'active';
+    await store.updateSitting(sitting);
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/reclaim', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.ownerUserId !== userId) {
+      res.status(403).json({ error: 'Only the original owner can reclaim a sit.' });
+      return;
+    }
+    if (sitting.status !== 'active' && sitting.status !== 'paused' && sitting.status !== 'awaiting-agreement') {
+      res.status(400).json({ error: 'That sit is not running.' });
+      return;
+    }
+    sitting.status = 'ended';
+    sitting.endedReason = 'reclaimed';
+    sitting.endedAt = Date.now();
+    await store.updateSitting(sitting);
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/end', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.petUserId !== userId && sitting.sitterUserId !== userId) {
+      res.status(403).json({ error: 'Only the pet or the sitter can end a sit.' });
+      return;
+    }
+    if (sitting.status !== 'active' && sitting.status !== 'paused') {
+      res.status(400).json({ error: 'Only a running sit can be ended.' });
+      return;
+    }
+    sitting.status = 'ended';
+    sitting.endedReason = sitting.petUserId === userId ? 'pet-ended' : 'sitter-ended';
+    sitting.endedAt = Date.now();
+    await store.updateSitting(sitting);
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/commands', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.sitterUserId !== userId) {
+      res.status(403).json({ error: 'Only the sitter can send commands during a sit.' });
+      return;
+    }
+    if (sitting.status !== 'active') {
+      res.status(400).json({ error: 'Commands can only be sent during an active sit.' });
+      return;
+    }
+    if (await sittingBlocked(sitting)) {
+      res.status(403).json({ error: 'You cannot send a command to someone you are blocked from.' });
+      return;
+    }
+    const contract = await store.getContract(sitting.baseContractId);
+    if (!contract || contract.status !== 'active') {
+      res.status(400).json({ error: 'The base contract must be active for sitting commands.' });
+      return;
+    }
+    const kind = req.body.kind as string | undefined;
+    if (!kind || !SITTING_COMMAND_KINDS.includes(kind)) {
+      res.status(400).json({ error: 'Command must be one of: Come home, Bedtime, Cage time, Eat, Walk, Potty break.' });
+      return;
+    }
+    const note = typeof req.body.note === 'string' ? req.body.note.trim() : '';
+    if (note.length > 200) {
+      res.status(400).json({ error: 'Command note must be 200 characters or fewer.' });
+      return;
+    }
+    const command = {
+      contractId: contract.id,
+      createdAt: Date.now(),
+      id: newId('command'),
+      kind: kind as 'Come home' | 'Bedtime' | 'Cage time' | 'Eat' | 'Walk' | 'Potty break',
+      note,
+      recipientUserId: sitting.petUserId,
+      senderUserId: userId,
+      status: 'sent' as const,
+      respondedAt: null,
+    };
+    await store.createOwnerCommand(command);
+    res.status(201).json({ command });
+  });
+
+  app.post('/api/v1/sittings/:id/routine-items', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.sitterUserId !== userId) {
+      res.status(403).json({ error: 'Only the sitter can add routine items during a sit.' });
+      return;
+    }
+    if (sitting.status !== 'active') {
+      res.status(400).json({ error: 'Routine items can only be added during an active sit.' });
+      return;
+    }
+    if (await sittingBlocked(sitting)) {
+      res.status(403).json({ error: 'You cannot add a routine item for someone you are blocked from.' });
+      return;
+    }
+    const date = typeof req.body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.date)
+      ? req.body.date
+      : new Date().toISOString().slice(0, 10);
+    const label = req.body.label as string | undefined;
+    if (!label || !['Eat', 'Walk', 'Potty', 'Nap', 'Play'].includes(label)) {
+      res.status(400).json({ error: 'Routine item must be one of: Eat, Walk, Potty, Nap, Play.' });
+      return;
+    }
+    const existing = (await store.routineItemsForUserOnDate(sitting.petUserId, date)).find((r) => r.label === label);
+    if (existing) {
+      res.json({ item: existing });
+      return;
+    }
+    const item = {
+      createdAt: Date.now(),
+      date,
+      id: newId('routine'),
+      label: label as 'Eat' | 'Walk' | 'Potty' | 'Nap' | 'Play',
+      status: 'open' as const,
+      userId: sitting.petUserId,
+    };
+    await store.createRoutineItem(item);
+    res.status(201).json({ item });
+  });
+
+  app.post('/api/v1/sittings/:id/checkins', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.sitterUserId !== userId) {
+      res.status(403).json({ error: 'Only the sitter can add a sit check-in.' });
+      return;
+    }
+    if (sitting.status !== 'active') {
+      res.status(400).json({ error: 'Check-ins can only be added during an active sit.' });
+      return;
+    }
+    if (await sittingBlocked(sitting)) {
+      res.status(403).json({ error: 'You cannot check in for someone you are blocked from.' });
+      return;
+    }
+    const text = typeof req.body.note === 'string' ? req.body.note.trim() : '';
+    if (text.length < 1 || text.length > 500) {
+      res.status(400).json({ error: 'Check-in note must be 1 to 500 characters.' });
+      return;
+    }
+    sitting.notes.push({ createdAt: Date.now(), text, userId });
+    await store.updateSitting(sitting);
+    res.status(201).json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/handover', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.sitterUserId !== userId && sitting.ownerUserId !== userId) {
+      res.status(403).json({ error: 'Only the sitter or the original owner can write a handover report.' });
+      return;
+    }
+    if (sitting.status !== 'ended' && sitting.status !== 'expired') {
+      res.status(400).json({ error: 'A handover report is written after a sit ends.' });
+      return;
+    }
+    if (sitting.handoverReport && sitting.sitterUserId === userId) {
+      res.status(409).json({ error: 'A handover report already exists for this sit.' });
+      return;
+    }
+    const report = typeof req.body.report === 'string' ? req.body.report.trim() : '';
+    if (report.length < 1 || report.length > 2000) {
+      res.status(400).json({ error: 'Handover report must be 1 to 2000 characters.' });
+      return;
+    }
+    sitting.handoverReport = report;
+    await store.updateSitting(sitting);
+    res.json({ sitting });
+  });
+
+  app.post('/api/v1/sittings/:id/badge', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const sitting = await loadSitting(res, req.params.id, userId);
+    if (!sitting) return;
+    if (sitting.ownerUserId !== userId) {
+      res.status(403).json({ error: 'Only the original owner can award a sitter badge.' });
+      return;
+    }
+    if (sitting.status !== 'ended' && sitting.status !== 'expired') {
+      res.status(400).json({ error: 'A sitter badge is only awarded after a sit ends.' });
+      return;
+    }
+    if (sitting.badgeAwarded) {
+      res.status(409).json({ error: 'A sitter badge was already awarded for this sit.' });
+      return;
+    }
+    if (!sitting.sitterUserId) {
+      res.status(400).json({ error: 'There is no sitter to badge for this sit.' });
+      return;
+    }
+    const safetyReports = (await store.listReports()).filter(
+      (r) => r.reportedUserId === sitting.sitterUserId && r.category === 'safety' && r.createdAt >= sitting.createdAt,
+    );
+    if (safetyReports.length > 0) {
+      res.status(400).json({ error: 'A safety report exists for this sitter, so no sitter badge can be awarded.' });
+      return;
+    }
+    sitting.badgeAwarded = true;
+    await store.updateSitting(sitting);
+    res.json({ sitting });
   });
 
   return app;

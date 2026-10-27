@@ -912,3 +912,228 @@ describe('Den & Desk API, Phase 3', () => {
     expect(afterEnd.status).toBe(400);
   });
 });
+
+describe('Den & Desk API, pet-sitting (test/dev)', () => {
+  beforeEach(async () => {
+    await store.reset();
+    delete process.env.MODERATOR_EMAILS;
+  });
+
+  async function signupProfileS(
+    email: string,
+    invite: string,
+    profile: { displayName: string; petType: string | null; role: string },
+  ) {
+    const user = await signup(email, invite);
+    const res = await request(app)
+      .post('/api/v1/profiles')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send(profile);
+    expect(res.status).toBe(201);
+    return user;
+  }
+
+  async function activeContractS(a: { token: string; user: { id: string } }, b: { token: string; user: { id: string } }) {
+    const created = await request(app)
+      .post('/api/v1/contracts')
+      .set('Authorization', `Bearer ${a.token}`)
+      .send({ limits: 'Kindness first.', partnerUserId: b.user.id, safeword: 'red', title: 'Our agreement' });
+    expect(created.status).toBe(201);
+    const id = created.body.contract.id as string;
+    await request(app).post(`/api/v1/contracts/${id}/sign`).set('Authorization', `Bearer ${a.token}`);
+    const signB = await request(app).post(`/api/v1/contracts/${id}/sign`).set('Authorization', `Bearer ${b.token}`);
+    expect(signB.body.contract.status).toBe('active');
+    return id;
+  }
+
+  async function trio() {
+    const owner = await signupProfileS('sit-o@example.com', 'DEN-WELCOME-2026', { displayName: 'Rowan', petType: null, role: 'Owner' });
+    const pet = await signupProfileS('sit-k@example.com', 'DEN-SECOND-2026', { displayName: 'Moss', petType: 'Kitty', role: 'Pet' });
+    const sitter = await signupProfileS('sit-s@example.com', 'DEN-THIRD-2026', { displayName: 'Fern', petType: null, role: 'Owner' });
+    const contractId = await activeContractS(owner, pet);
+    return { contractId, owner, pet, sitter };
+  }
+
+  function window() {
+    const now = Date.now();
+    return { endsAt: now + 7 * 24 * 60 * 60 * 1000, startsAt: now + 60 * 60 * 1000 };
+  }
+
+  async function activeSit(t: Awaited<ReturnType<typeof trio>>) {
+    const created = await request(app)
+      .post('/api/v1/sittings')
+      .set('Authorization', `Bearer ${t.owner.token}`)
+      .send({ baseContractId: t.contractId, ...window(), limits: 'Gentle only.', routineSummary: 'Feed, play, nap.', safewordNote: 'Safeword still applies.' });
+    expect(created.status).toBe(201);
+    const id = created.body.sitting.id as string;
+    expect(Object.keys(created.body.sitting)).not.toContain('address');
+    expect(Object.keys(created.body.sitting)).not.toContain('keys');
+    const applied = await request(app).post(`/api/v1/sittings/${id}/apply`).set('Authorization', `Bearer ${t.sitter.token}`);
+    expect(applied.body.sitting.status).toBe('awaiting-agreement');
+    const ownerAgree = await request(app).post(`/api/v1/sittings/${id}/agree`).set('Authorization', `Bearer ${t.owner.token}`);
+    expect(ownerAgree.body.sitting.status).toBe('awaiting-agreement');
+    const petAgree = await request(app).post(`/api/v1/sittings/${id}/agree`).set('Authorization', `Bearer ${t.pet.token}`);
+    expect(petAgree.body.sitting.status).toBe('active');
+    return id;
+  }
+
+  it('requires both owner and pet agreement before a sit starts, and the sitter cannot agree for them', async () => {
+    const t = await trio();
+    const created = await request(app)
+      .post('/api/v1/sittings')
+      .set('Authorization', `Bearer ${t.owner.token}`)
+      .send({ baseContractId: t.contractId, ...window(), routineSummary: 'Feed, play, nap.' });
+    expect(created.status).toBe(201);
+    const id = created.body.sitting.id as string;
+    expect(created.body.sitting.status).toBe('requested');
+    const sitterAgree = await request(app).post(`/api/v1/sittings/${id}/agree`).set('Authorization', `Bearer ${t.sitter.token}`);
+    expect(sitterAgree.status).toBe(403);
+    await request(app).post(`/api/v1/sittings/${id}/apply`).set('Authorization', `Bearer ${t.sitter.token}`);
+    const oneAgree = await request(app).post(`/api/v1/sittings/${id}/agree`).set('Authorization', `Bearer ${t.owner.token}`);
+    expect(oneAgree.body.sitting.status).toBe('awaiting-agreement');
+  });
+
+  it('lets the sitter run commands, routine items, and check-ins during an active sit', async () => {
+    const t = await trio();
+    const id = await activeSit(t);
+    const command = await request(app)
+      .post(`/api/v1/sittings/${id}/commands`)
+      .set('Authorization', `Bearer ${t.sitter.token}`)
+      .send({ kind: 'Eat', note: 'Dinner time.' });
+    expect(command.status).toBe(201);
+    expect(command.body.command.recipientUserId).toBe(t.pet.user.id);
+    const answered = await request(app)
+      .post(`/api/v1/commands/${command.body.command.id}/respond`)
+      .set('Authorization', `Bearer ${t.pet.token}`)
+      .send({ status: 'done' });
+    expect(answered.body.command.status).toBe('done');
+    const routine = await request(app)
+      .post(`/api/v1/sittings/${id}/routine-items`)
+      .set('Authorization', `Bearer ${t.sitter.token}`)
+      .send({ label: 'Eat' });
+    expect(routine.status).toBe(201);
+    expect(routine.body.item.userId).toBe(t.pet.user.id);
+    const checkin = await request(app)
+      .post(`/api/v1/sittings/${id}/checkins`)
+      .set('Authorization', `Bearer ${t.sitter.token}`)
+      .send({ note: 'Ate well, playing now.' });
+    expect(checkin.status).toBe(201);
+    expect(checkin.body.sitting.notes).toHaveLength(1);
+  });
+
+  it('lets the original owner reclaim instantly, and sitting actions stop after reclaim', async () => {
+    const t = await trio();
+    const id = await activeSit(t);
+    const reclaimed = await request(app).post(`/api/v1/sittings/${id}/reclaim`).set('Authorization', `Bearer ${t.owner.token}`);
+    expect(reclaimed.body.sitting.status).toBe('ended');
+    expect(reclaimed.body.sitting.endedReason).toBe('reclaimed');
+    const after = await request(app)
+      .post(`/api/v1/sittings/${id}/commands`)
+      .set('Authorization', `Bearer ${t.sitter.token}`)
+      .send({ kind: 'Eat' });
+    expect(after.status).toBe(400);
+  });
+
+  it('lets the pet pause, resume, and end a sit', async () => {
+    const t = await trio();
+    const id = await activeSit(t);
+    const paused = await request(app).post(`/api/v1/sittings/${id}/pause`).set('Authorization', `Bearer ${t.pet.token}`);
+    expect(paused.body.sitting.status).toBe('paused');
+    const blockedCommand = await request(app)
+      .post(`/api/v1/sittings/${id}/commands`)
+      .set('Authorization', `Bearer ${t.sitter.token}`)
+      .send({ kind: 'Eat' });
+    expect(blockedCommand.status).toBe(400);
+    const resumed = await request(app).post(`/api/v1/sittings/${id}/resume`).set('Authorization', `Bearer ${t.pet.token}`);
+    expect(resumed.body.sitting.status).toBe('active');
+    const ended = await request(app).post(`/api/v1/sittings/${id}/end`).set('Authorization', `Bearer ${t.pet.token}`);
+    expect(ended.body.sitting.status).toBe('ended');
+    expect(ended.body.sitting.endedReason).toBe('pet-ended');
+  });
+
+  it('expires a sit automatically once its window passes', async () => {
+    const t = await trio();
+    const id = await activeSit(t);
+    const sitting = await store.getSitting(id);
+    expect(sitting).toBeDefined();
+    if (sitting) {
+      sitting.endsAt = Date.now() - 1000;
+      await store.updateSitting(sitting);
+    }
+    const fetched = await request(app).get(`/api/v1/sittings/${id}`).set('Authorization', `Bearer ${t.owner.token}`);
+    expect(fetched.body.sitting.status).toBe('expired');
+    expect(fetched.body.sitting.endedReason).toBe('expired');
+  });
+
+  it('records a handover report and awards a badge after a clean completed sit', async () => {
+    const t = await trio();
+    const id = await activeSit(t);
+    await request(app).post(`/api/v1/sittings/${id}/end`).set('Authorization', `Bearer ${t.pet.token}`);
+    const handover = await request(app)
+      .post(`/api/v1/sittings/${id}/handover`)
+      .set('Authorization', `Bearer ${t.sitter.token}`)
+      .send({ report: 'Ate well, slept fine, one muddy paw.' });
+    expect(handover.status).toBe(200);
+    expect(handover.body.sitting.handoverReport).toMatch(/muddy paw/);
+    const badge = await request(app).post(`/api/v1/sittings/${id}/badge`).set('Authorization', `Bearer ${t.owner.token}`);
+    expect(badge.status).toBe(200);
+    expect(badge.body.sitting.badgeAwarded).toBe(true);
+  });
+
+  it('refuses a sitter badge when a safety report exists for the sitter', async () => {
+    const t = await trio();
+    const id = await activeSit(t);
+    await request(app).post(`/api/v1/sittings/${id}/end`).set('Authorization', `Bearer ${t.pet.token}`);
+    const report = await request(app)
+      .post('/api/v1/reports')
+      .set('Authorization', `Bearer ${t.owner.token}`)
+      .send({ category: 'safety', details: 'test safety report', reportedUserId: t.sitter.user.id });
+    expect(report.status).toBe(201);
+    const badge = await request(app).post(`/api/v1/sittings/${id}/badge`).set('Authorization', `Bearer ${t.owner.token}`);
+    expect(badge.status).toBe(400);
+  });
+
+  it('excludes blocked pairs, has no extend endpoint, and keeps the sitter out of the main contract', async () => {
+    const t = await trio();
+    const blocked = await signupProfileS('sit-b@example.com', 'DEN-FOURTH-2026', { displayName: 'Briar', petType: null, role: 'Owner' });
+    await request(app).post('/api/v1/blocks').set('Authorization', `Bearer ${t.owner.token}`).send({ blockedUserId: blocked.user.id });
+    const created = await request(app)
+      .post('/api/v1/sittings')
+      .set('Authorization', `Bearer ${t.owner.token}`)
+      .send({ baseContractId: t.contractId, ...window(), routineSummary: 'Feed, play, nap.' });
+    const id = created.body.sitting.id as string;
+    const applyBlocked = await request(app).post(`/api/v1/sittings/${id}/apply`).set('Authorization', `Bearer ${blocked.token}`);
+    expect(applyBlocked.status).toBe(403);
+    const extend = await request(app).post(`/api/v1/sittings/${id}/extend`).set('Authorization', `Bearer ${t.sitter.token}`).send({ endsAt: Date.now() + 99 * 24 * 60 * 60 * 1000 });
+    expect(extend.status).toBe(404);
+    const activeId = await activeSit(t);
+    const signAsSitter = await request(app).post(`/api/v1/contracts/${t.contractId}/sign`).set('Authorization', `Bearer ${t.sitter.token}`);
+    expect(signAsSitter.status).toBe(403);
+    expect(activeId).toBeTruthy();
+  });
+
+  it('fails loudly with 503 when SMTP is not configured and dev codes are off', async () => {
+    const savedAllow = process.env.ALLOW_DEV_CODE;
+    const savedSmtp = process.env.SMTP_HOST;
+    delete process.env.ALLOW_DEV_CODE;
+    delete process.env.SMTP_HOST;
+    delete process.env.SMTP_PORT;
+    delete process.env.SMTP_USER;
+    delete process.env.SMTP_PASS;
+    delete process.env.SMTP_FROM;
+    try {
+      const freshStore = new InMemoryStore(['DEN-WELCOME-2026']);
+      const freshApp = createApp(freshStore);
+      const res = await request(freshApp)
+        .post('/api/v1/auth/request-code')
+        .send({ dateOfBirth: '2000-01-01', email: 'smtp-fail@example.com', inviteCode: 'DEN-WELCOME-2026' });
+      expect(res.status).toBe(503);
+      expect(res.body.devCode).toBeUndefined();
+      const verify = await request(freshApp).post('/api/v1/auth/verify-code').send({ code: '000000', email: 'smtp-fail@example.com' });
+      expect(verify.status).toBe(401);
+    } finally {
+      if (savedAllow !== undefined) process.env.ALLOW_DEV_CODE = savedAllow;
+      if (savedSmtp !== undefined) process.env.SMTP_HOST = savedSmtp;
+    }
+  });
+});

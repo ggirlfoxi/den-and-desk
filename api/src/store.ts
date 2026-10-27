@@ -233,6 +233,7 @@ export interface LostAlert {
   // never real contact details.
   reward: LostReward;
 }
+
 export type PraiseKind = 'praise' | 'correction';
 export interface PraiseNote {
   id: string;
@@ -241,6 +242,43 @@ export interface PraiseNote {
   recipientUserId: string;
   kind: PraiseKind;
   text: string;
+  createdAt: number;
+}
+
+/** Pet-sitting (test/dev build): a bounded, temporary sitting agreement.
+ *  It is NOT a transfer of the main contract and never carries a home
+ *  address, keys, or any real-world access detail — those are never
+ *  fields here, by design. The sitter only runs day-to-day routine /
+ *  commands / check-ins inside the app, for the agreed window only.
+ *  Both the original owner AND the pet must agree before a sit starts;
+ *  the original owner can reclaim instantly, the pet can pause or end
+ *  instantly, and control auto-returns when the window ends. A sitter
+ *  trust badge is only awarded after a completed sit with no safety
+ *  report against the sitter. Blocked pairs cannot sit for each other. */
+export type SittingStatus = 'requested' | 'awaiting-agreement' | 'active' | 'paused' | 'ended' | 'expired';
+export interface SittingNote {
+  userId: string;
+  text: string;
+  createdAt: number;
+}
+export interface Sitting {
+  id: string;
+  baseContractId: string;
+  ownerUserId: string;
+  petUserId: string;
+  sitterUserId: string | null;
+  status: SittingStatus;
+  startsAt: number;
+  endsAt: number;
+  routineSummary: string;
+  limits: string;
+  safewordNote: string;
+  agreedUserIds: string[];
+  notes: SittingNote[];
+  handoverReport: string;
+  badgeAwarded: boolean;
+  endedReason: string | null;
+  endedAt: number | null;
   createdAt: number;
 }
 
@@ -351,6 +389,11 @@ export interface Store {
   getGameToken(userId: string): Promise<string | null>;
   createPraiseNote(note: PraiseNote): Promise<void>;
   praiseNotesForContract(contractId: string): Promise<PraiseNote[]>;
+  // Pet-sitting: temporary, bounded sits on top of an active contract.
+  createSitting(sitting: Sitting): Promise<void>;
+  getSitting(id: string): Promise<Sitting | undefined>;
+  updateSitting(sitting: Sitting): Promise<void>;
+  sittingsForUser(userId: string): Promise<Sitting[]>;
   reset(): Promise<void>;
 }
 
@@ -396,6 +439,7 @@ export class InMemoryStore implements Store {
   private lostSounds = new Map<string, boolean>();
   private gameTokens = new Map<string, string>();
   private praiseNotes: PraiseNote[] = [];
+  private sittings: Sitting[] = [];
 
   constructor(inviteCodes: string[]) {
     for (const code of inviteCodes) this.invites.set(code, null);
@@ -699,6 +743,19 @@ export class InMemoryStore implements Store {
   async praiseNotesForContract(contractId: string) {
     return this.praiseNotes.filter((p) => p.contractId === contractId);
   }
+  async createSitting(sitting: Sitting) {
+    this.sittings.push(sitting);
+  }
+  async getSitting(id: string) {
+    return this.sittings.find((x) => x.id === id);
+  }
+  async updateSitting(sitting: Sitting) {
+    const i = this.sittings.findIndex((x) => x.id === sitting.id);
+    if (i >= 0) this.sittings[i] = sitting;
+  }
+  async sittingsForUser(userId: string) {
+    return this.sittings.filter((x) => x.ownerUserId === userId || x.petUserId === userId || x.sitterUserId === userId);
+  }
   async reset() {
     this.users.clear();
     this.profiles.clear();
@@ -725,6 +782,7 @@ export class InMemoryStore implements Store {
     this.lostSounds.clear();
     this.gameTokens.clear();
     this.praiseNotes = [];
+    this.sittings = [];
     for (const key of this.invites.keys()) this.invites.set(key, null);
   }
 }
