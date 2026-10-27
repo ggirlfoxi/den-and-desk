@@ -80,13 +80,53 @@ and "Publishing to GitHub" below for the exact blockers.
   gentle correction note. Notes are private between the pair, no
   public shaming, no financial punishment, and safeword / pause /
   block still override everything.
-- **Phase 3 Postgres gap (stated plainly)**: the Postgres adapter
-  implements Phase 3 storage as explicit stubs that throw "Phase 3
-  storage is not implemented for Postgres yet". Phase 3 endpoints
-  work with the in-memory store and must NOT be offered on a
-  Postgres deployment until real tables are added and tested
-  against a live database. Phase 0–2 Postgres behaviour is
-  unaffected.
+## Test/dev slice: Postgres storage, SMTP code, pet-sitting
+
+**TEST/DEV ONLY, FREE ONLY.** This slice is for testing and
+developing only — not a production launch, not for real users, not
+an open beta, no invites sent. No payment, paid plan, paid provider,
+card, subscription, or converting trial is used anywhere, and even
+after a polished product exists, payment is a separate future user
+decision — never automatic, never assumed. If any step in
+DEPLOY.md asks for payment, STOP and report it as blocked.
+
+- **Phase 3 Postgres storage (gap closed in code, live test still
+  owed)**: real tables and adapter queries in `api/src/db/schema.sql`
+  and `api/src/db/postgres.ts` for owner commands, routine items,
+  wishlist items, lost alerts + lost settings + game-area tokens,
+  and praise notes. The previous "stubs that throw" are gone.
+  Honest limit: this was verified only against a mock Pool in
+  unit tests (SQL strings + row mapping) plus schema review — no
+  Postgres server was available in this build environment, so a
+  live test against a free test DATABASE_URL is still required
+  before any shared test deployment. See DEPLOY.md.
+- **SMTP email delivery (code only, no provider, no real send)**:
+  a dependency-free SMTP client in `api/src/email.ts`, driven only
+  by SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_FROM.
+  If SMTP is not configured, login-code requests fail loudly with
+  503 and no code is stored, sent, or logged. The local dev code
+  path stays local-only, off by default (ALLOW_DEV_CODE must be
+  explicitly 'true'), and refused in production. No real email was
+  sent in this build; unit tests use a local fake SMTP server only.
+- **Pet-sitting (temporary, bounded sits)**: an original owner posts
+  a sitting request on an active contract (dates, routine summary,
+  limits, safeword note — no home address, no keys, ever); a sitter
+  applies; BOTH owner and pet must agree before the sit starts;
+  the sitter then runs day-to-day routine / commands / check-ins
+  for the bounded window only; the sitter cannot change the main
+  contract, cannot extend the sit (no extend endpoint exists), and
+  cannot contact the pet after it ends unless the pet agrees
+  separately; the original owner can reclaim instantly, the pet can
+  pause or end instantly, control auto-returns at expiry, a
+  handover report is recorded at the end, and a sitter trust badge
+  is awarded only after a completed sit with no safety report.
+  Blocked pairs cannot sit for each other. 18+ adults only.
+- **DEPLOY.md**: the exact remaining steps for a live test service,
+  in order — free-tier API host sign-in (user step), free test
+  Postgres, free-tier SMTP env vars, MODERATOR_EMAILS, INVITE_CODES,
+  and the still-open age-assurance budget decision — each marked
+  STOP on any payment demand. Production launch is a separate
+  future user decision.
 
 ## What Phase 2 adds
 
