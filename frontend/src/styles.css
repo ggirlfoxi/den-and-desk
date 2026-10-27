@@ -8,4 +8,12 @@ label { font-weight: 600; }
 .quick-exit { position: fixed; top: 0.75rem; right: 0.75rem; z-index: 10; background: #7a2e2e; color: #fff; border-color: #7a2e2e; }
 .card { background: #fff; border: 1px solid #e5d9c8; border-radius: 1rem; padding: 1.25rem; margin: 1rem 0; }
 .error { color: #7a2e2e; }
+.den-door { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(43, 35, 32, 0.55); }
+.den-door-panel { background: #fff8ee; border: 1px solid #6b4f3a; border-radius: 1rem; padding: 1.5rem 2rem; font-size: 1.1rem; animation: denopen 0.9s ease-out; }
+@keyframes denopen { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .den-door-panel { animation: none; } }
+.lost-poster { border: 2px solid #7a2e2e; border-radius: 0.75rem; padding: 1rem; margin: 0.75rem 0; background: #fffdf6; animation: posterpulse 2.4s ease-in-out infinite; }
+@keyframes posterpulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(122, 46, 46, 0); } 50% { box-shadow: 0 0 0 6px rgba(122, 46, 46, 0.12); } }
+.game-board { border: 1px dashed #6b4f3a; border-radius: 0.75rem; padding: 1rem; margin: 0.75rem 0; background: #f3ece2; }
+@media (prefers-reduced-motion: reduce) { .lost-poster { animation: none; } }
 .small { font-size: 0.9rem; color: #6b5d52; }

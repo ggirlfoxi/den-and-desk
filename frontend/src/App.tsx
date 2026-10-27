@@ -77,6 +77,17 @@ type AftercarePlan = { id: string; closurePhrase: string; selfCarePrompts: strin
 type AftercareCheckin = { id: string; kind: string; note: string; dueAt: number; completedAt: number | null };
 type VideoHello = { id: string; requesterUserId: string; recipientUserId: string; message: string; status: string };
 type ScheduledCheckin = { id: string; creatorUserId: string; recipientUserId: string; note: string; dueAt: number; completedAt: number | null };
+type OwnerCommand = { id: string; senderUserId: string; recipientUserId: string; kind: string; note: string; status: string };
+type RoutineItem = { id: string; date: string; label: string; status: string };
+type WishlistItem = { id: string; label: string; category: string; note: string; shared: boolean };
+type LostAlert = { id: string; contractId: string; petUserId: string; ownerUserId: string; petDisplayName: string; petType: string | null; generalArea: string; createdAt: number; reward: string; soundEnabled: boolean };
+type PraiseNote = { id: string; senderUserId: string; recipientUserId: string; kind: string; text: string };
+const REWARD_LINES: Record<string, string> = {
+  badge: 'a Good Finder badge/sticker in-app',
+  'thank-you': 'a thank-you note in-app',
+  treat: 'a treat for the finder\'s own pet',
+  'wishlist-gift': 'a wishlist gift between people who already know each other',
+};
 
 async function api(path: string, token: string | null, body?: unknown, method?: string) {
   const res = await fetch(path, {
@@ -159,6 +170,35 @@ export default function App() {
   const [schedCheckins, setSchedCheckins] = useState<ScheduledCheckin[]>([]);
   const [schedDue, setSchedDue] = useState('');
   const [schedNote, setSchedNote] = useState('');
+
+  // Phase 3: commands, routine, wishlist, lost mode, praise, den animation.
+  const [denAnimation, setDenAnimation] = useState(false);
+  const [denCue, setDenCue] = useState('');
+  const [commands, setCommands] = useState<OwnerCommand[]>([]);
+  const [commandKind, setCommandKind] = useState('Come home');
+  const [commandNote, setCommandNote] = useState('');
+  const [routineItems, setRoutineItems] = useState<RoutineItem[]>([]);
+  const [routineDate, setRoutineDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [wishlistItems, setWishlistItems] = useState<WishlistItem[]>([]);
+  const [sharedWishlist, setSharedWishlist] = useState<WishlistItem[]>([]);
+  const [wishLabel, setWishLabel] = useState('');
+  const [wishCategory, setWishCategory] = useState('collar');
+  const [wishNote, setWishNote] = useState('');
+  const [wishShared, setWishShared] = useState(false);
+  const [lostAlerts, setLostAlerts] = useState<LostAlert[]>([]);
+  const [lostArea, setLostArea] = useState('');
+  const [lostReward, setLostReward] = useState('badge');
+  const [gameArea, setGameArea] = useState('');
+  const [myGameArea, setMyGameArea] = useState('');
+  const [nearbyAlerts, setNearbyAlerts] = useState<LostAlert[]>([]);
+  const [lostSoundServer, setLostSoundServer] = useState(true);
+  const [lostOptIn, setLostOptIn] = useState(false);
+  const [lostMessage, setLostMessage] = useState('');
+  const [lostSoundOn, setLostSoundOn] = useState(() => localStorage.getItem('dd_lost_sound') === 'on');
+  const [lostVolume, setLostVolume] = useState(() => Number(localStorage.getItem('dd_lost_volume') ?? '50'));
+  const [praiseNotes, setPraiseNotes] = useState<PraiseNote[]>([]);
+  const [praiseKind, setPraiseKind] = useState('praise');
+  const [praiseText, setPraiseText] = useState('');
 
   useEffect(() => {
     if (!token) return;
@@ -245,8 +285,30 @@ export default function App() {
       const nextToken = data.token as string;
       localStorage.setItem('dd_token', nextToken);
       setToken(nextToken);
-      setProfile((data.profile as Profile | null) ?? null);
-      setView(data.profile ? 'dashboard' : 'profile');
+      const nextProfile = (data.profile as Profile | null) ?? null;
+      setProfile(nextProfile);
+      // Phase 3 den-door animation on successful login: a short door
+      // opening, under a second, no sound by default, instant when
+      // reduced motion is preferred. It stores nothing and changes
+      // nothing about auth — it is a welcome cue, with a different
+      // wording for Owner vs Pet.
+      const cue =
+        nextProfile?.role === 'Owner'
+          ? 'The Desk opens the Den.'
+          : nextProfile?.role === 'Pet'
+            ? 'Welcome home to the Den.'
+            : 'The Den door opens.';
+      setDenCue(cue);
+      const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+      if (reduced) {
+        setView(nextProfile ? 'dashboard' : 'profile');
+      } else {
+        setDenAnimation(true);
+        window.setTimeout(() => {
+          setDenAnimation(false);
+          setView(nextProfile ? 'dashboard' : 'profile');
+        }, 900);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Code verification failed.');
     }
@@ -403,6 +465,12 @@ export default function App() {
       setHellos(h.hellos);
       const sc = (await api(`/api/v1/contracts/${contractId}/checkins`, token)) as { checkins: ScheduledCheckin[] };
       setSchedCheckins(sc.checkins);
+      const cmd = (await api(`/api/v1/contracts/${contractId}/commands`, token)) as { commands: OwnerCommand[] };
+      setCommands(cmd.commands);
+      const pr = (await api(`/api/v1/contracts/${contractId}/praise`, token)) as { notes: PraiseNote[] };
+      setPraiseNotes(pr.notes);
+      const sw = (await api(`/api/v1/contracts/${contractId}/wishlist`, token)) as { items: WishlistItem[] };
+      setSharedWishlist(sw.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load contract details.');
     }
@@ -635,6 +703,222 @@ export default function App() {
     }
   };
 
+  // ---- Phase 3 handlers ----
+  const loadPhase3Personal = async () => {
+    if (!token) return;
+    try {
+      const r = (await api(`/api/v1/routine?date=${routineDate}`, token)) as { items: RoutineItem[] };
+      setRoutineItems(r.items);
+      const w = (await api('/api/v1/wishlist', token)) as { items: WishlistItem[] };
+      setWishlistItems(w.items);
+      const l = (await api('/api/v1/lost', token)) as { alerts: LostAlert[] };
+      setLostAlerts(l.alerts);
+      const o = (await api('/api/v1/lost-opt-in', token)) as { enabled: boolean };
+      setLostOptIn(o.enabled);
+      const n = (await api('/api/v1/lost/nearby', token)) as { alerts: LostAlert[] };
+      setNearbyAlerts(n.alerts);
+      const s = (await api('/api/v1/lost-sound', token)) as { enabled: boolean };
+      setLostSoundServer(s.enabled);
+      const g = (await api('/api/v1/game-area', token)) as { area: string | null };
+      setMyGameArea(g.area ?? '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load Phase 3 items.');
+    }
+  };
+
+  const sendCommand = async () => {
+    if (!token || !selectedContractId) return;
+    try {
+      await api(`/api/v1/contracts/${selectedContractId}/commands`, token, { kind: commandKind, note: commandNote });
+      await loadContractDetails(selectedContractId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send command.');
+    }
+  };
+
+  const respondCommand = async (commandId: string, status: string) => {
+    if (!token) return;
+    try {
+      await api(`/api/v1/commands/${commandId}/respond`, token, { status });
+      if (selectedContractId) await loadContractDetails(selectedContractId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not answer command.');
+    }
+  };
+
+  const addRoutineItem = async (label: string) => {
+    if (!token) return;
+    try {
+      await api('/api/v1/routine/items', token, { date: routineDate, label });
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add routine item.');
+    }
+  };
+
+  const respondRoutineItem = async (itemId: string, status: string) => {
+    if (!token) return;
+    try {
+      await api(`/api/v1/routine/items/${itemId}/respond`, token, { status });
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not answer routine item.');
+    }
+  };
+
+  const addWishlistItem = async () => {
+    if (!token || !wishLabel.trim()) return;
+    try {
+      await api('/api/v1/wishlist', token, { category: wishCategory, label: wishLabel.trim(), note: wishNote, shared: wishShared });
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add wishlist item.');
+    }
+  };
+
+  const toggleWishlistShare = async (item: WishlistItem) => {
+    if (!token) return;
+    try {
+      await api(`/api/v1/wishlist/${item.id}`, token, { shared: !item.shared }, 'PATCH');
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change wishlist sharing.');
+    }
+  };
+
+  const removeWishlistItem = async (itemId: string) => {
+    if (!token) return;
+    try {
+      await api(`/api/v1/wishlist/${itemId}`, token, undefined, 'DELETE');
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not remove wishlist item.');
+    }
+  };
+
+  const setLostOptInValue = async (enabled: boolean) => {
+    if (!token) return;
+    try {
+      await api('/api/v1/lost-opt-in', token, { enabled });
+      setLostOptIn(enabled);
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change lost-game opt-in.');
+    }
+  };
+
+  const createLostAlert = async () => {
+    if (!token || !selectedContractId || !lostArea.trim()) return;
+    try {
+      await api(`/api/v1/contracts/${selectedContractId}/lost`, token, { generalArea: lostArea.trim(), reward: lostReward });
+      setNotice('Lost mode is on. Only a general area is shown — never a street address or precise location.');
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not turn on lost mode.');
+    }
+  };
+
+  const lostAction = async (alertId: string, action: 'home' | 'off' | 'resolve' | 'found') => {
+    if (!token) return;
+    try {
+      await api(`/api/v1/lost/${alertId}/${action}`, token);
+      if (action === 'resolve') {
+        const alert = lostAlerts.find((a) => a.id === alertId);
+        setNotice(`Lost alert confirmed resolved in-app. Reward offered in-app: ${REWARD_LINES[alert?.reward ?? 'badge']}`);
+      }
+      if (action === 'found') {
+        setNotice('Marked found in-app and messaged the original owner in-app only. No meeting, no following, no transport.');
+      }
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Could not ${action} lost alert.`);
+    }
+  };
+
+  const setLostSoundServerValue = async (enabled: boolean) => {
+    if (!token) return;
+    try {
+      await api('/api/v1/lost-sound', token, { enabled });
+      setLostSoundServer(enabled);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change lost-game sound setting.');
+    }
+  };
+
+  const checkIntoGameArea = async () => {
+    if (!token || !gameArea.trim()) return;
+    try {
+      await api('/api/v1/game-area', token, { area: gameArea.trim() });
+      setMyGameArea(gameArea.trim());
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not check into a play area.');
+    }
+  };
+
+  // Finder proximity sound: plays only when the finder and the lost
+  // pet are in the SAME in-game play area (both checked into the same
+  // typed label, or the pet moved their game token there), the pet
+  // has not muted the lost-game sound, the finder's own toggle is on,
+  // and lost mode is on. Never real location, never real distance.
+  const playFinderSound = (alert: LostAlert) => {
+    if (!lostSoundOn || !alert.soundEnabled) return;
+    if (!nearbyAlerts.some((a) => a.id === alert.id)) return;
+    playLostSound();
+  };
+
+  const lostHelperMessage = async (alertId: string) => {
+    if (!token || !lostMessage.trim()) return;
+    try {
+      await api(`/api/v1/lost/${alertId}/message`, token, { body: lostMessage.trim() });
+      setNotice('Message sent to the original owner in-app. Do not meet anyone in person because of a lost alert.');
+      await loadPhase3Personal();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not message the owner about this lost alert.');
+    }
+  };
+
+  const sendPraise = async () => {
+    if (!token || !selectedContractId || !praiseText.trim()) return;
+    try {
+      await api(`/api/v1/contracts/${selectedContractId}/praise`, token, { kind: praiseKind, text: praiseText.trim() });
+      await loadContractDetails(selectedContractId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send praise note.');
+    }
+  };
+
+  // Lost-game sound: opt-in, pet-controlled, in-app only, never
+  // autoplayed and never proximity-triggered. It plays a short
+  // synthesised notification tone through the device's own audio when
+  // the pet presses Play, only while the pet has lost-game mode on,
+  // and only when the sound toggle is on. Default is silent.
+  const playLostSound = () => {
+    if (!lostSoundOn) return;
+    const myLost = lostAlerts.some((a) => a.petUserId === profile?.userId);
+    if (!myLost) return;
+    try {
+      const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      const now = ctx.currentTime;
+      osc.frequency.setValueAtTime(620, now);
+      osc.frequency.exponentialRampToValueAtTime(920, now + 0.15);
+      osc.frequency.exponentialRampToValueAtTime(520, now + 0.4);
+      gain.gain.setValueAtTime((lostVolume / 100) * 0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.45);
+    } catch {
+      // Sound is a game extra only; silence is always an acceptable fallback.
+    }
+  };
+
   if (view === 'exit') {
     return (
       <main>
@@ -648,6 +932,11 @@ export default function App() {
 
   return (
     <main>
+      {denAnimation && (
+        <div className="den-door" role="status">
+          <div className="den-door-panel">🚪 {denCue}</div>
+        </div>
+      )}
       {view !== 'landing' && (
         <button className="quick-exit" onClick={quickExit}>
           Quick exit
@@ -1134,6 +1423,233 @@ export default function App() {
                 ))}
               </>
             )}
+          </div>
+          <div className="card">
+            <h2>Phase 3: routine, commands, wishlist, lost mode, praise</h2>
+            <button onClick={() => void loadPhase3Personal()}>Load Phase 3 items</button>
+            <h3>Owner commands (active contract only)</h3>
+            <p className="small">Cage time means cozy den / quiet time, never confinement punishment. A safeword, pause, block, or contract end always overrides a command.</p>
+            <label>
+              Command
+              <select value={commandKind} onChange={(e) => setCommandKind(e.target.value)}>
+                <option>Come home</option>
+                <option>Bedtime</option>
+                <option>Cage time</option>
+                <option>Eat</option>
+                <option>Walk</option>
+                <option>Potty break</option>
+              </select>
+            </label>
+            <label>
+              Note (optional)
+              <input value={commandNote} onChange={(e) => setCommandNote(e.target.value)} />
+            </label>
+            <button onClick={() => void sendCommand()}>Send command</button>
+            {commands.map((c) => (
+              <div key={c.id}>
+                {c.kind} · {c.status}
+                {c.note ? ` · ${c.note}` : ''}
+                {c.recipientUserId === profile?.userId && c.status === 'sent' && (
+                  <>
+                    <button onClick={() => void respondCommand(c.id, 'done')}>Done</button>
+                    <button onClick={() => void respondCommand(c.id, 'need-help')}>Need help</button>
+                    <button onClick={() => void respondCommand(c.id, 'passed')}>Pass</button>
+                  </>
+                )}
+              </div>
+            ))}
+            <h3>Daily pet-care routine (no streaks, Pass is excused)</h3>
+            <label>
+              Day
+              <input type="date" value={routineDate} onChange={(e) => setRoutineDate(e.target.value)} />
+            </label>
+            {['Eat', 'Walk', 'Potty', 'Nap', 'Play'].map((label) => (
+              <button key={label} onClick={() => void addRoutineItem(label)}>
+                Add {label}
+              </button>
+            ))}
+            {routineItems.map((r) => (
+              <div key={r.id}>
+                {r.label} · {r.status}
+                {r.status === 'open' && (
+                  <>
+                    <button onClick={() => void respondRoutineItem(r.id, 'done')}>Done</button>
+                    <button onClick={() => void respondRoutineItem(r.id, 'passed')}>Pass</button>
+                  </>
+                )}
+              </div>
+            ))}
+            <h3>Gear wishlist (no purchases, no prices, no shop links)</h3>
+            <p className="small">Private by default. Share an item only if you choose to, and only your contract partner can see shared items.</p>
+            <label>
+              Item
+              <input value={wishLabel} onChange={(e) => setWishLabel(e.target.value)} />
+            </label>
+            <label>
+              Category
+              <select value={wishCategory} onChange={(e) => setWishCategory(e.target.value)}>
+                <option value="collar">Collar</option>
+                <option value="leash">Leash</option>
+                <option value="outfit">Outfit</option>
+                <option value="den">Den / cage</option>
+                <option value="toy">Toy</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label>
+              Note (optional)
+              <input value={wishNote} onChange={(e) => setWishNote(e.target.value)} />
+            </label>
+            <label>
+              <input type="checkbox" checked={wishShared} onChange={(e) => setWishShared(e.target.checked)} /> Share with my contract partner
+            </label>
+            <button onClick={() => void addWishlistItem()}>Add to wishlist</button>
+            {wishlistItems.map((w) => (
+              <div key={w.id}>
+                {w.label} · {w.category} · {w.shared ? 'shared' : 'private'}
+                {w.note ? ` · ${w.note}` : ''}
+                <button onClick={() => void toggleWishlistShare(w)}>{w.shared ? 'Make private' : 'Share'}</button>
+                <button onClick={() => void removeWishlistItem(w.id)}>Remove</button>
+              </div>
+            ))}
+            <h3>Partner&apos;s shared wishlist</h3>
+            {sharedWishlist.map((w) => (
+              <div key={w.id}>
+                {w.label} · {w.category}
+                {w.note ? ` · ${w.note}` : ''}
+              </div>
+            ))}
+            <h3>Lost pets — safe lost mode (adults 18+ only, opt-in)</h3>
+            <p className="small">
+              A pet&apos;s in-app tag shows pseudonym and pet type only — never a real name, phone, address, or precise location, and no QR or tag links to a real identity.
+              Lost mode is separately opt-in by the pet: an owner can only start it when the pet has opted in, and the pet can end it instantly.
+              No GPS, no real-time tracking, and no location is ever auto-detected.
+            </p>
+            <h4>Caught protocol — please read before helping</h4>
+            <p className="small">
+              DO: ask first in-app, respect the safeword instantly, stop if the pet is out of headspace or distressed, contact the original owner in-app first, and let the original owner confirm.
+              DO NOT: follow, touch without consent, share a photo or location, approach a pet who is alone and distressed, or transport a person in a vehicle.
+              &quot;Transported home&quot; here means only: a helper marks found in-app, the owner confirms, and the pet checks in as home. The original owner, or the pet themselves, is the only person who physically moves the pet, and only if already agreed separately.
+            </p>
+            <label>
+              <input type="checkbox" checked={lostOptIn} onChange={(e) => void setLostOptInValue(e.target.checked)} /> I opt into lost-game mode (pet&apos;s own choice; turning this off closes my open lost alerts)
+            </label>
+            <label>
+              General area for a lost alert (general area only, never a street address)
+              <input value={lostArea} onChange={(e) => setLostArea(e.target.value)} />
+            </label>
+            <label>
+              Reward on the poster (in-app only — never cash, never a payment, never real contact details)
+              <select value={lostReward} onChange={(e) => setLostReward(e.target.value)}>
+                <option value="badge">Good Finder badge/sticker</option>
+                <option value="thank-you">Thank-you note</option>
+                <option value="treat">Treat for the finder&apos;s own pet</option>
+                <option value="wishlist-gift">Wishlist gift (people who already know each other)</option>
+              </select>
+            </label>
+            <button onClick={() => void createLostAlert()}>I lost my pet / turn lost mode on</button>
+            <label>
+              <input type="checkbox" checked={lostSoundServer} onChange={(e) => void setLostSoundServerValue(e.target.checked)} /> Pet-controlled lost-game sound: on (I can mute this at any time)
+            </label>
+            <h4>In-app game board (stylised board, not a real map)</h4>
+            <p className="small">Check into a play area by typing its label — for example &quot;Forest clearing&quot;. Moving your game token here is the only &quot;proximity&quot; in this game. Nothing here uses your real location.</p>
+            <div className="game-board">
+              <div>Your token: {myGameArea ? `🎮 in ${myGameArea}` : 'not checked into a play area yet'}</div>
+              {nearbyAlerts.map((a) => (
+                <div key={`board-${a.id}`}>🐾 {a.petDisplayName}&apos;s token is in this play area too</div>
+              ))}
+            </div>
+            <label>
+              Play-area label
+              <input value={gameArea} onChange={(e) => setGameArea(e.target.value)} />
+            </label>
+            <button onClick={() => void checkIntoGameArea()}>Check into play area / move my game token</button>
+            <h4>Lost pets in your play area (proximity sound)</h4>
+            <p className="small">When a lost pet&apos;s token is in the same play area as yours, and the pet has not muted the sound, the finder sound button below plays the distinct app sound. It never plays from a real distance.</p>
+            {nearbyAlerts.map((a) => (
+              <div key={`nearby-${a.id}`} className="lost-poster">
+                <strong>LOST — Please find my {a.petType === 'Puppy' ? 'dog' : 'cat'}</strong>
+                <div>{a.petDisplayName} · {a.petType ?? 'Pet'} · {a.generalArea}</div>
+                <div>Reward: {REWARD_LINES[a.reward] ?? REWARD_LINES.badge}</div>
+                <button onClick={() => playFinderSound(a)} disabled={!lostSoundOn || !a.soundEnabled}>
+                  Play finder sound (same play area only)
+                </button>
+              </div>
+            ))}
+            <h4>Lost-game sound (opt-in, in-app only, default silent)</h4>
+            <p className="small">This sound never plays by itself, never plays in public by default, and is never triggered by location. Press Play only while your own lost mode is on.</p>
+            <label>
+              <input
+                type="checkbox"
+                checked={lostSoundOn}
+                onChange={(e) => {
+                  setLostSoundOn(e.target.checked);
+                  localStorage.setItem('dd_lost_sound', e.target.checked ? 'on' : 'off');
+                }}
+              /> Lost-game sound on
+            </label>
+            <label>
+              Volume
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={lostVolume}
+                onChange={(e) => {
+                  setLostVolume(Number(e.target.value));
+                  localStorage.setItem('dd_lost_volume', e.target.value);
+                }}
+              />
+            </label>
+            <button onClick={playLostSound} disabled={!lostSoundOn || !lostAlerts.some((a) => a.petUserId === profile?.userId)}>
+              Play lost-game sound
+            </button>
+            {lostAlerts.map((a) => (
+              <div key={a.id} className="lost-poster">
+                <strong>LOST — Please find my {a.petType === 'Puppy' ? 'dog' : 'cat'}</strong>
+                <div>{a.petDisplayName} · {a.petType ?? 'Pet'} · {a.generalArea}</div>
+                <div>Reward: {REWARD_LINES[a.reward] ?? REWARD_LINES.badge}</div>
+                <div className="small">Distinct app sound: {a.soundEnabled ? 'on (pet-controlled, mutable)' : 'muted by the pet'}</div>
+                {a.petUserId === profile?.userId && (
+                  <>
+                    <button onClick={() => void lostAction(a.id, 'home')}>I am home</button>
+                    <button onClick={() => void lostAction(a.id, 'off')}>Turn lost mode off</button>
+                  </>
+                )}
+                {a.ownerUserId === profile?.userId && <button onClick={() => void lostAction(a.id, 'resolve')}>Mark resolved (owner confirms)</button>}
+                {a.petUserId !== profile?.userId && a.ownerUserId !== profile?.userId && (
+                  <button onClick={() => void lostAction(a.id, 'found')}>I think I found them (in-app message to the owner only — no meeting, no transport)</button>
+                )}
+              </div>
+            ))}
+            <label>
+              Message to the original owner about a lost pet (in-app only — never share a location or phone, never arrange to meet in person)
+              <input value={lostMessage} onChange={(e) => setLostMessage(e.target.value)} />
+            </label>
+            {lostAlerts.map((a) => (
+              <div key={`msg-${a.id}`}>
+                <button onClick={() => void lostHelperMessage(a.id)}>Message {a.petDisplayName}&apos;s owner</button>
+              </div>
+            ))}
+            <h3>Praise (private between the pair)</h3>
+            <p className="small">No public shaming, no financial punishment. Safeword, pause, and block still override everything.</p>
+            <label>
+              Kind
+              <select value={praiseKind} onChange={(e) => setPraiseKind(e.target.value)}>
+                <option value="praise">Praise</option>
+                <option value="correction">Gentle correction</option>
+              </select>
+            </label>
+            <label>
+              Note
+              <input value={praiseText} onChange={(e) => setPraiseText(e.target.value)} />
+            </label>
+            <button onClick={() => void sendPraise()}>Send praise note</button>
+            {praiseNotes.map((p) => (
+              <div key={p.id}>
+                {p.kind} · {p.text}
+              </div>
+            ))}
           </div>
           <div className="card">
             <h2>Report someone</h2>
