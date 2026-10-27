@@ -5,11 +5,14 @@
  * Short-lived email codes (10-minute expiry) are kept in memory even
  * when Postgres is in use, by design — they must not survive a restart.
  *
- * NOTE: this adapter is code-complete but was NOT integration-tested
- * against a live database in Phase 0 or Phase 1, because no Postgres
- * server was available in the build environment and none was
- * provisioned (no paid plan, no hosted account). Run it once against a
- * staging DATABASE_URL before using it for a shared deployment.
+ * NOTE: this adapter was NOT integration-tested against a live
+ * Postgres server in this test/dev build, because no Postgres server
+ * is available in the build environment and none was provisioned
+ * (free-only, test/dev only — no paid plan, no hosted account).
+ * Phase 3 and pet-sitting storage were verified only against a mock
+ * Pool in unit tests (SQL strings and row mapping) plus schema
+ * review. Run it once against a free test DATABASE_URL before any
+ * shared test deployment.
  * Phase 1 adds likes, passes, messages and ratings tables; a database
  * created from the Phase 0 schema needs the ALTER / CREATE statements
  * noted at the bottom of schema.sql before Phase 1 code runs against it.
@@ -23,18 +26,24 @@ import type {
   Contract,
   Duty,
   Like,
+  LostAlert,
   Message,
   Pass,
+  OwnerCommand,
   PendingCode,
+  PraiseNote,
   Profile,
   Rating,
   Report,
+  RoutineItem,
   Reward,
   ScheduledCheckin,
+  Sitting,
   Store,
   TrustSummary,
   User,
   VideoHello,
+  WishlistItem,
 } from '../store';
 import { badgeFor } from '../store';
 
@@ -164,6 +173,106 @@ function toMessage(row: Record<string, unknown>): Message {
     recipientUserId: row.recipient_user_id as string,
     senderUserId: row.sender_user_id as string,
   };
+}
+
+
+function toOwnerCommand(row: Record<string, unknown>): OwnerCommand {
+  return {
+    contractId: row.contract_id as string,
+    createdAt: new Date(row.created_at as string).getTime(),
+    id: row.id as string,
+    kind: row.kind as OwnerCommand['kind'],
+    note: row.note as string,
+    recipientUserId: row.recipient_user_id as string,
+    respondedAt: row.responded_at ? new Date(row.responded_at as string).getTime() : null,
+    senderUserId: row.sender_user_id as string,
+    status: row.status as OwnerCommand['status'],
+  };
+}
+function toRoutineItem(row: Record<string, unknown>): RoutineItem {
+  return {
+    createdAt: new Date(row.created_at as string).getTime(),
+    date: row.date as string,
+    id: row.id as string,
+    label: row.label as RoutineItem['label'],
+    status: row.status as RoutineItem['status'],
+    userId: row.user_id as string,
+  };
+}
+function toWishlistItem(row: Record<string, unknown>): WishlistItem {
+  return {
+    category: row.category as WishlistItem['category'],
+    createdAt: new Date(row.created_at as string).getTime(),
+    id: row.id as string,
+    label: row.label as string,
+    note: row.note as string,
+    shared: row.shared as boolean,
+    userId: row.user_id as string,
+  };
+}
+function toLostAlert(row: Record<string, unknown>): LostAlert {
+  return {
+    contractId: row.contract_id as string,
+    createdAt: new Date(row.created_at as string).getTime(),
+    createdByUserId: row.created_by_user_id as string,
+    foundAt: row.found_at ? new Date(row.found_at as string).getTime() : null,
+    foundByUserId: (row.found_by_user_id as string | null) ?? null,
+    generalArea: row.general_area as string,
+    id: row.id as string,
+    ownerUserId: row.owner_user_id as string,
+    petUserId: row.pet_user_id as string,
+    resolvedAt: row.resolved_at ? new Date(row.resolved_at as string).getTime() : null,
+    resolvedReason: (row.resolved_reason as string | null) ?? null,
+    reward: (row.reward as LostAlert['reward']) ?? 'badge',
+    status: row.status as LostAlert['status'],
+  };
+}
+function toPraiseNote(row: Record<string, unknown>): PraiseNote {
+  return {
+    contractId: row.contract_id as string,
+    createdAt: new Date(row.created_at as string).getTime(),
+    id: row.id as string,
+    kind: row.kind as PraiseNote['kind'],
+    recipientUserId: row.recipient_user_id as string,
+    senderUserId: row.sender_user_id as string,
+    text: row.text as string,
+  };
+}
+function toSitting(row: Record<string, unknown>): Sitting {
+  const notesRaw = row.notes as unknown;
+  const notes = Array.isArray(notesRaw) ? (notesRaw as Sitting['notes']) : [];
+  return {
+    agreedUserIds: (row.agreed_user_ids as string[]) ?? [],
+    badgeAwarded: row.badge_awarded as boolean,
+    baseContractId: row.base_contract_id as string,
+    createdAt: new Date(row.created_at as string).getTime(),
+    endedAt: row.ended_at ? new Date(row.ended_at as string).getTime() : null,
+    endedReason: (row.ended_reason as string | null) ?? null,
+    endsAt: new Date(row.ends_at as string).getTime(),
+    handoverReport: row.handover_report as string,
+    id: row.id as string,
+    limits: row.limits as string,
+    notes,
+    ownerUserId: row.owner_user_id as string,
+    petUserId: row.pet_user_id as string,
+    routineSummary: row.routine_summary as string,
+    safewordNote: row.safeword_note as string,
+    sitterUserId: (row.sitter_user_id as string | null) ?? null,
+    startsAt: new Date(row.starts_at as string).getTime(),
+    status: row.status as Sitting['status'],
+  };
+}
+async function upsertLostSettings(pool: import('pg').Pool, userId: string, patch: { optIn?: boolean; soundEnabled?: boolean; gameArea?: string | null }): Promise<void> {
+  const cur = await pool.query('SELECT * FROM lost_settings WHERE user_id = $1', [userId]);
+  const row = cur.rows[0] as Record<string, unknown> | undefined;
+  const optIn = patch.optIn ?? (row?.opt_in as boolean ?? false);
+  const soundEnabled = patch.soundEnabled ?? (row?.sound_enabled as boolean ?? true);
+  const gameArea = patch.gameArea !== undefined ? patch.gameArea : ((row?.game_area as string | null) ?? null);
+  await pool.query(
+    `INSERT INTO lost_settings (user_id, opt_in, sound_enabled, game_area) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE SET opt_in = EXCLUDED.opt_in, sound_enabled = EXCLUDED.sound_enabled, game_area = EXCLUDED.game_area`,
+    [userId, optIn, soundEnabled, gameArea],
+  );
 }
 
 export class PostgresStore implements Store {
@@ -482,92 +591,138 @@ export class PostgresStore implements Store {
     const res = await this.pool.query('SELECT * FROM scheduled_checkins WHERE contract_id = $1 ORDER BY due_at ASC, id ASC', [contractId]);
     return res.rows.map(toScheduledCheckin);
   }
-  // Phase 3 storage is not yet implemented for Postgres. These stubs
-  // keep the Store contract typed while making the gap explicit:
-  // Phase 3 endpoints work with the in-memory store and must not be
-  // offered on a Postgres deployment until real tables are added and
-  // tested against a live database. Existing Phase 0–2 behaviour is
-  // unaffected.
-  private phase3Unsupported(): never {
-    throw new Error('Phase 3 storage is not implemented for Postgres yet.');
+  // Phase 3 storage (Postgres). No precise location, phone, price,
+  // or payment is stored anywhere here — lost alerts carry only a
+  // user-typed general-area label, and wishlist items carry no price.
+  async createOwnerCommand(command: OwnerCommand): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO owner_commands (id, contract_id, sender_user_id, recipient_user_id, kind, note, status, responded_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [command.id, command.contractId, command.senderUserId, command.recipientUserId, command.kind, command.note, command.status, command.respondedAt ? new Date(command.respondedAt) : null],
+    );
   }
-  async createOwnerCommand(): Promise<void> {
-    this.phase3Unsupported();
+  async getOwnerCommand(id: string): Promise<OwnerCommand | undefined> {
+    const res = await this.pool.query('SELECT * FROM owner_commands WHERE id = $1', [id]);
+    return res.rows[0] ? toOwnerCommand(res.rows[0]) : undefined;
   }
-  async getOwnerCommand(): Promise<undefined> {
-    this.phase3Unsupported();
+  async updateOwnerCommand(command: OwnerCommand): Promise<void> {
+    await this.pool.query('UPDATE owner_commands SET status = $2, responded_at = $3 WHERE id = $1', [command.id, command.status, command.respondedAt ? new Date(command.respondedAt) : null]);
   }
-  async updateOwnerCommand(): Promise<void> {
-    this.phase3Unsupported();
+  async ownerCommandsForContract(contractId: string): Promise<OwnerCommand[]> {
+    const res = await this.pool.query('SELECT * FROM owner_commands WHERE contract_id = $1 ORDER BY created_at ASC, id ASC', [contractId]);
+    return res.rows.map(toOwnerCommand);
   }
-  async ownerCommandsForContract(): Promise<[]> {
-    this.phase3Unsupported();
+  async createRoutineItem(item: RoutineItem): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO routine_items (id, user_id, date, label, status) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id, date, label) DO NOTHING',
+      [item.id, item.userId, item.date, item.label, item.status],
+    );
   }
-  async createRoutineItem(): Promise<void> {
-    this.phase3Unsupported();
+  async routineItemsForUserOnDate(userId: string, date: string): Promise<RoutineItem[]> {
+    const res = await this.pool.query('SELECT * FROM routine_items WHERE user_id = $1 AND date = $2 ORDER BY created_at ASC, id ASC', [userId, date]);
+    return res.rows.map(toRoutineItem);
   }
-  async routineItemsForUserOnDate(): Promise<[]> {
-    this.phase3Unsupported();
+  async getRoutineItem(id: string): Promise<RoutineItem | undefined> {
+    const res = await this.pool.query('SELECT * FROM routine_items WHERE id = $1', [id]);
+    return res.rows[0] ? toRoutineItem(res.rows[0]) : undefined;
   }
-  async getRoutineItem(): Promise<undefined> {
-    this.phase3Unsupported();
+  async updateRoutineItem(item: RoutineItem): Promise<void> {
+    await this.pool.query('UPDATE routine_items SET status = $2 WHERE id = $1', [item.id, item.status]);
   }
-  async updateRoutineItem(): Promise<void> {
-    this.phase3Unsupported();
+  async createWishlistItem(item: WishlistItem): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO wishlist_items (id, user_id, label, category, note, shared) VALUES ($1, $2, $3, $4, $5, $6)',
+      [item.id, item.userId, item.label, item.category, item.note, item.shared],
+    );
   }
-  async createWishlistItem(): Promise<void> {
-    this.phase3Unsupported();
+  async wishlistForUser(userId: string): Promise<WishlistItem[]> {
+    const res = await this.pool.query('SELECT * FROM wishlist_items WHERE user_id = $1 ORDER BY created_at ASC, id ASC', [userId]);
+    return res.rows.map(toWishlistItem);
   }
-  async wishlistForUser(): Promise<[]> {
-    this.phase3Unsupported();
+  async getWishlistItem(id: string): Promise<WishlistItem | undefined> {
+    const res = await this.pool.query('SELECT * FROM wishlist_items WHERE id = $1', [id]);
+    return res.rows[0] ? toWishlistItem(res.rows[0]) : undefined;
   }
-  async getWishlistItem(): Promise<undefined> {
-    this.phase3Unsupported();
+  async updateWishlistItem(item: WishlistItem): Promise<void> {
+    await this.pool.query('UPDATE wishlist_items SET shared = $2 WHERE id = $1', [item.id, item.shared]);
   }
-  async updateWishlistItem(): Promise<void> {
-    this.phase3Unsupported();
+  async deleteWishlistItem(id: string): Promise<void> {
+    await this.pool.query('DELETE FROM wishlist_items WHERE id = $1', [id]);
   }
-  async deleteWishlistItem(): Promise<void> {
-    this.phase3Unsupported();
+  async createLostAlert(alert: LostAlert): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO lost_alerts (id, contract_id, pet_user_id, owner_user_id, created_by_user_id, general_area, status, resolved_reason, resolved_at, found_by_user_id, found_at, reward) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)',
+      [alert.id, alert.contractId, alert.petUserId, alert.ownerUserId, alert.createdByUserId, alert.generalArea, alert.status, alert.resolvedReason, alert.resolvedAt ? new Date(alert.resolvedAt) : null, alert.foundByUserId, alert.foundAt ? new Date(alert.foundAt) : null, alert.reward],
+    );
   }
-  async createLostAlert(): Promise<void> {
-    this.phase3Unsupported();
+  async getLostAlert(id: string): Promise<LostAlert | undefined> {
+    const res = await this.pool.query('SELECT * FROM lost_alerts WHERE id = $1', [id]);
+    return res.rows[0] ? toLostAlert(res.rows[0]) : undefined;
   }
-  async getLostAlert(): Promise<undefined> {
-    this.phase3Unsupported();
+  async updateLostAlert(alert: LostAlert): Promise<void> {
+    await this.pool.query(
+      'UPDATE lost_alerts SET status = $2, resolved_reason = $3, resolved_at = $4, found_by_user_id = $5, found_at = $6 WHERE id = $1',
+      [alert.id, alert.status, alert.resolvedReason, alert.resolvedAt ? new Date(alert.resolvedAt) : null, alert.foundByUserId, alert.foundAt ? new Date(alert.foundAt) : null],
+    );
   }
-  async updateLostAlert(): Promise<void> {
-    this.phase3Unsupported();
+  async openLostAlertForContract(contractId: string): Promise<LostAlert | undefined> {
+    const res = await this.pool.query("SELECT * FROM lost_alerts WHERE contract_id = $1 AND status = 'lost' ORDER BY created_at ASC, id ASC LIMIT 1", [contractId]);
+    return res.rows[0] ? toLostAlert(res.rows[0]) : undefined;
   }
-  async openLostAlertForContract(): Promise<undefined> {
-    this.phase3Unsupported();
+  async openLostAlerts(): Promise<LostAlert[]> {
+    const res = await this.pool.query("SELECT * FROM lost_alerts WHERE status = 'lost' ORDER BY created_at ASC, id ASC");
+    return res.rows.map(toLostAlert);
   }
-  async openLostAlerts(): Promise<[]> {
-    this.phase3Unsupported();
+  async getLostOptIn(userId: string): Promise<boolean> {
+    const res = await this.pool.query('SELECT opt_in FROM lost_settings WHERE user_id = $1', [userId]);
+    return res.rows[0] ? (res.rows[0].opt_in as boolean) : false;
   }
-  async getLostOptIn(): Promise<boolean> {
-    this.phase3Unsupported();
+  async setLostOptIn(userId: string, enabled: boolean): Promise<void> {
+    await upsertLostSettings(this.pool, userId, { optIn: enabled });
   }
-  async setLostOptIn(): Promise<void> {
-    this.phase3Unsupported();
+  async getLostSound(userId: string): Promise<boolean> {
+    const res = await this.pool.query('SELECT sound_enabled FROM lost_settings WHERE user_id = $1', [userId]);
+    return res.rows[0] ? (res.rows[0].sound_enabled as boolean) : true;
   }
-  async getLostSound(): Promise<boolean> {
-    this.phase3Unsupported();
+  async setLostSound(userId: string, enabled: boolean): Promise<void> {
+    await upsertLostSettings(this.pool, userId, { soundEnabled: enabled });
   }
-  async setLostSound(): Promise<void> {
-    this.phase3Unsupported();
+  async setGameToken(userId: string, area: string): Promise<void> {
+    await upsertLostSettings(this.pool, userId, { gameArea: area });
   }
-  async setGameToken(): Promise<void> {
-    this.phase3Unsupported();
+  async getGameToken(userId: string): Promise<string | null> {
+    const res = await this.pool.query('SELECT game_area FROM lost_settings WHERE user_id = $1', [userId]);
+    return res.rows[0] ? ((res.rows[0].game_area as string | null) ?? null) : null;
   }
-  async getGameToken(): Promise<null> {
-    this.phase3Unsupported();
+  async createPraiseNote(note: PraiseNote): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO praise_notes (id, contract_id, sender_user_id, recipient_user_id, kind, text) VALUES ($1, $2, $3, $4, $5, $6)',
+      [note.id, note.contractId, note.senderUserId, note.recipientUserId, note.kind, note.text],
+    );
   }
-  async createPraiseNote(): Promise<void> {
-    this.phase3Unsupported();
+  async praiseNotesForContract(contractId: string): Promise<PraiseNote[]> {
+    const res = await this.pool.query('SELECT * FROM praise_notes WHERE contract_id = $1 ORDER BY created_at ASC, id ASC', [contractId]);
+    return res.rows.map(toPraiseNote);
   }
-  async praiseNotesForContract(): Promise<[]> {
-    this.phase3Unsupported();
+  // Pet-sitting storage (Postgres). No address or keys are stored.
+  async createSitting(sitting: Sitting): Promise<void> {
+    await this.pool.query(
+      'INSERT INTO sittings (id, base_contract_id, owner_user_id, pet_user_id, sitter_user_id, status, starts_at, ends_at, routine_summary, limits, safeword_note, agreed_user_ids, notes, handover_report, badge_awarded, ended_reason, ended_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)',
+      [sitting.id, sitting.baseContractId, sitting.ownerUserId, sitting.petUserId, sitting.sitterUserId, sitting.status, new Date(sitting.startsAt), new Date(sitting.endsAt), sitting.routineSummary, sitting.limits, sitting.safewordNote, sitting.agreedUserIds, JSON.stringify(sitting.notes), sitting.handoverReport, sitting.badgeAwarded, sitting.endedReason, sitting.endedAt ? new Date(sitting.endedAt) : null],
+    );
+  }
+  async getSitting(id: string): Promise<Sitting | undefined> {
+    const res = await this.pool.query('SELECT * FROM sittings WHERE id = $1', [id]);
+    return res.rows[0] ? toSitting(res.rows[0]) : undefined;
+  }
+  async updateSitting(sitting: Sitting): Promise<void> {
+    await this.pool.query(
+      'UPDATE sittings SET sitter_user_id = $2, status = $3, agreed_user_ids = $4, notes = $5, handover_report = $6, badge_awarded = $7, ended_reason = $8, ended_at = $9 WHERE id = $1',
+      [sitting.id, sitting.sitterUserId, sitting.status, sitting.agreedUserIds, JSON.stringify(sitting.notes), sitting.handoverReport, sitting.badgeAwarded, sitting.endedReason, sitting.endedAt ? new Date(sitting.endedAt) : null],
+    );
+  }
+  async sittingsForUser(userId: string): Promise<Sitting[]> {
+    const res = await this.pool.query('SELECT * FROM sittings WHERE owner_user_id = $1 OR pet_user_id = $1 OR sitter_user_id = $1 ORDER BY created_at DESC, id DESC', [userId]);
+    return res.rows.map(toSitting);
   }
   async reset(): Promise<void> {
     throw new Error('PostgresStore reset is not supported in production.');

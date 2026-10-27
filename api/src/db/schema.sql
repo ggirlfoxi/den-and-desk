@@ -167,3 +167,93 @@ CREATE TABLE IF NOT EXISTS scheduled_checkins (
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Phase 3 tables: owner commands, daily routine items, gear wishlist
+-- (no prices, no payments), safe lost-pet alerts, lost-game settings
+-- and game-area tokens, and private praise notes. Lost alerts carry
+-- only a user-typed general-area label — never a precise location,
+-- never a phone number, never coordinates.
+CREATE TABLE IF NOT EXISTS owner_commands (
+  id TEXT PRIMARY KEY,
+  contract_id TEXT NOT NULL REFERENCES contracts(id),
+  sender_user_id TEXT NOT NULL REFERENCES users(id),
+  recipient_user_id TEXT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('Come home', 'Bedtime', 'Cage time', 'Eat', 'Walk', 'Potty break')),
+  note TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('sent', 'done', 'need-help', 'passed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  responded_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS routine_items (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  date TEXT NOT NULL,
+  label TEXT NOT NULL CHECK (label IN ('Eat', 'Walk', 'Potty', 'Nap', 'Play')),
+  status TEXT NOT NULL CHECK (status IN ('open', 'done', 'passed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, date, label)
+);
+CREATE TABLE IF NOT EXISTS wishlist_items (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  label TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('collar', 'leash', 'outfit', 'den', 'toy', 'other')),
+  note TEXT NOT NULL DEFAULT '',
+  shared BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS lost_alerts (
+  id TEXT PRIMARY KEY,
+  contract_id TEXT NOT NULL REFERENCES contracts(id),
+  pet_user_id TEXT NOT NULL REFERENCES users(id),
+  owner_user_id TEXT NOT NULL REFERENCES users(id),
+  created_by_user_id TEXT NOT NULL REFERENCES users(id),
+  general_area TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('lost', 'home', 'resolved')),
+  resolved_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ,
+  found_by_user_id TEXT REFERENCES users(id),
+  found_at TIMESTAMPTZ,
+  reward TEXT NOT NULL DEFAULT 'badge' CHECK (reward IN ('badge', 'thank-you', 'treat', 'wishlist-gift'))
+);
+CREATE TABLE IF NOT EXISTS lost_settings (
+  user_id TEXT PRIMARY KEY REFERENCES users(id),
+  opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+  sound_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  game_area TEXT
+);
+CREATE TABLE IF NOT EXISTS praise_notes (
+  id TEXT PRIMARY KEY,
+  contract_id TEXT NOT NULL REFERENCES contracts(id),
+  sender_user_id TEXT NOT NULL REFERENCES users(id),
+  recipient_user_id TEXT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('praise', 'correction')),
+  text TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Pet-sitting tables (test/dev build): bounded temporary sits on top
+-- of an active contract. No home address, no keys, no real-world
+-- access detail is stored anywhere in this schema, by design.
+CREATE TABLE IF NOT EXISTS sittings (
+  id TEXT PRIMARY KEY,
+  base_contract_id TEXT NOT NULL REFERENCES contracts(id),
+  owner_user_id TEXT NOT NULL REFERENCES users(id),
+  pet_user_id TEXT NOT NULL REFERENCES users(id),
+  sitter_user_id TEXT REFERENCES users(id),
+  status TEXT NOT NULL CHECK (status IN ('requested', 'awaiting-agreement', 'active', 'paused', 'ended', 'expired')),
+  starts_at TIMESTAMPTZ NOT NULL,
+  ends_at TIMESTAMPTZ NOT NULL,
+  routine_summary TEXT NOT NULL DEFAULT '',
+  limits TEXT NOT NULL DEFAULT '',
+  safeword_note TEXT NOT NULL DEFAULT '',
+  agreed_user_ids TEXT[] NOT NULL DEFAULT '{}',
+  notes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  handover_report TEXT NOT NULL DEFAULT '',
+  badge_awarded BOOLEAN NOT NULL DEFAULT FALSE,
+  ended_reason TEXT,
+  ended_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (ends_at > starts_at)
+);
