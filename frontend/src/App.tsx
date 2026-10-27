@@ -82,6 +82,7 @@ type RoutineItem = { id: string; date: string; label: string; status: string };
 type WishlistItem = { id: string; label: string; category: string; note: string; shared: boolean };
 type LostAlert = { id: string; contractId: string; petUserId: string; ownerUserId: string; petDisplayName: string; petType: string | null; generalArea: string; createdAt: number; reward: string; soundEnabled: boolean };
 type PraiseNote = { id: string; senderUserId: string; recipientUserId: string; kind: string; text: string };
+type Sitting = { id: string; baseContractId: string; ownerUserId: string; petUserId: string; sitterUserId: string | null; status: string; startsAt: number; endsAt: number; routineSummary: string; limits: string; safewordNote: string; agreedUserIds: string[]; notes: { userId: string; text: string; createdAt: number }[]; handoverReport: string; badgeAwarded: boolean; endedReason: string | null };
 const REWARD_LINES: Record<string, string> = {
   badge: 'a Good Finder badge/sticker in-app',
   'thank-you': 'a thank-you note in-app',
@@ -199,6 +200,14 @@ export default function App() {
   const [praiseNotes, setPraiseNotes] = useState<PraiseNote[]>([]);
   const [praiseKind, setPraiseKind] = useState('praise');
   const [praiseText, setPraiseText] = useState('');
+  const [sittings, setSittings] = useState<Sitting[]>([]);
+  const [sitStart, setSitStart] = useState('');
+  const [sitEnd, setSitEnd] = useState('');
+  const [sitRoutine, setSitRoutine] = useState('');
+  const [sitLimits, setSitLimits] = useState('');
+  const [sitSafewordNote, setSitSafewordNote] = useState('');
+  const [sitNote, setSitNote] = useState('');
+  const [sitHandover, setSitHandover] = useState('');
 
   useEffect(() => {
     if (!token) return;
@@ -885,6 +894,34 @@ export default function App() {
       await loadContractDetails(selectedContractId);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send praise note.');
+    }
+  };
+
+  const loadSittings = async () => {
+    if (!token) return;
+    try {
+      const data = await api('/api/v1/sittings', token);
+      setSittings(data.sittings as Sitting[]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load sittings.');
+    }
+  };
+  const createSitting = async () => {
+    if (!token || !selectedContractId || !sitRoutine.trim() || !sitStart || !sitEnd) return;
+    try {
+      await api('/api/v1/sittings', token, { baseContractId: selectedContractId, endsAt: new Date(sitEnd).getTime(), limits: sitLimits, routineSummary: sitRoutine.trim(), safewordNote: sitSafewordNote, startsAt: new Date(sitStart).getTime() });
+      await loadSittings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create sitting request.');
+    }
+  };
+  const sittingAction = async (id: string, action: string, body?: unknown) => {
+    if (!token) return;
+    try {
+      await api(`/api/v1/sittings/${id}/${action}`, token, body);
+      await loadSittings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Could not ${action} this sit.`);
     }
   };
 
@@ -1648,6 +1685,57 @@ export default function App() {
             {praiseNotes.map((p) => (
               <div key={p.id}>
                 {p.kind} · {p.text}
+              </div>
+            ))}
+          </div>
+          <div className="card">
+            <h2>Pet-sitting (test/dev only — bounded, temporary sits)</h2>
+            <p className="small">A sit never transfers the main contract and never carries a home address or keys. Both the original owner and the pet must agree before a sit starts. The owner can reclaim instantly, the pet can pause or end instantly, and control returns automatically when the window ends. A sitter badge is only awarded after a completed sit with no safety report.</p>
+            <button onClick={() => void loadSittings()}>Load sittings</button>
+            <label>
+              Sitting start
+              <input type="datetime-local" value={sitStart} onChange={(e) => setSitStart(e.target.value)} />
+            </label>
+            <label>
+              Sitting end
+              <input type="datetime-local" value={sitEnd} onChange={(e) => setSitEnd(e.target.value)} />
+            </label>
+            <label>
+              Routine summary
+              <input value={sitRoutine} onChange={(e) => setSitRoutine(e.target.value)} />
+            </label>
+            <label>
+              Limits
+              <input value={sitLimits} onChange={(e) => setSitLimits(e.target.value)} />
+            </label>
+            <label>
+              Safeword note
+              <input value={sitSafewordNote} onChange={(e) => setSitSafewordNote(e.target.value)} />
+            </label>
+            <button onClick={() => void createSitting()}>Post sitting request (original owner, selected contract)</button>
+            {sittings.map((sit) => (
+              <div key={sit.id}>
+                <div>{sit.status} · {new Date(sit.startsAt).toLocaleString()} to {new Date(sit.endsAt).toLocaleString()} · {sit.routineSummary}</div>
+                <div className="small">Agreed: {sit.agreedUserIds.length} · Badge: {sit.badgeAwarded ? 'awarded' : 'not awarded'}{sit.handoverReport ? ` · Handover: ${sit.handoverReport}` : ''}</div>
+                <button onClick={() => void sittingAction(sit.id, 'apply')}>Apply as sitter</button>
+                <button onClick={() => void sittingAction(sit.id, 'agree')}>Agree (owner or pet)</button>
+                <button onClick={() => void sittingAction(sit.id, 'pause')}>Pause (pet)</button>
+                <button onClick={() => void sittingAction(sit.id, 'resume')}>Resume (pet)</button>
+                <button onClick={() => void sittingAction(sit.id, 'reclaim')}>Reclaim (original owner)</button>
+                <button onClick={() => void sittingAction(sit.id, 'end')}>End (pet or sitter)</button>
+                <button onClick={() => void sittingAction(sit.id, 'commands', { kind: 'Eat' })}>Sitter command: Eat</button>
+                <button onClick={() => void sittingAction(sit.id, 'routine-items', { label: 'Eat' })}>Sitter routine: Eat</button>
+                <label>
+                  Sit check-in note
+                  <input value={sitNote} onChange={(e) => setSitNote(e.target.value)} />
+                </label>
+                <button onClick={() => void sittingAction(sit.id, 'checkins', { note: sitNote })}>Add check-in (sitter)</button>
+                <label>
+                  Handover report
+                  <input value={sitHandover} onChange={(e) => setSitHandover(e.target.value)} />
+                </label>
+                <button onClick={() => void sittingAction(sit.id, 'handover', { report: sitHandover })}>Write handover (after end)</button>
+                <button onClick={() => void sittingAction(sit.id, 'badge')}>Award sitter badge (original owner, clean sit only)</button>
               </div>
             ))}
           </div>
