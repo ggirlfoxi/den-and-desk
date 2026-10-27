@@ -8,10 +8,14 @@ import {
   newId,
   type Contract,
   type DiscoveryFilters,
+  type LostReward,
   type MeetingMode,
+  type OwnerCommandKind,
   type PetType,
   type Role,
+  type RoutineLabel,
   type Store,
+  type WishlistCategory,
 } from './store';
 
 export function inviteCodesFromEnv(): string[] {
@@ -543,6 +547,23 @@ export function createApp(store: Store) {
   async function blockedPair(contract: { proposerUserId: string; partnerUserId: string }): Promise<boolean> {
     return blockedEitherWay(contract.proposerUserId, contract.partnerUserId);
   }
+  // Phase 3 helpers. A lost alert is never a location: it carries only
+  // a user-typed general-area label, and it ends the moment the pet
+  // checks in, turns it off, uses a safeword, or the contract is
+  // paused or ended — whichever comes first.
+  async function resolveOpenLostAlert(contractId: string, reason: string): Promise<void> {
+    const open = await store.openLostAlertForContract(contractId);
+    if (open) {
+      open.status = 'resolved';
+      open.resolvedReason = reason;
+      open.resolvedAt = Date.now();
+      await store.updateLostAlert(open);
+    }
+  }
+  async function isOwnerRole(userId: string): Promise<boolean> {
+    const profile = await store.getProfileByUserId(userId);
+    return profile?.role === 'Owner' || profile?.role === 'Switch';
+  }
 
   app.post('/api/v1/contracts', requireAuth, async (req, res) => {
     const userId = (req as Request & { userId: string }).userId;
@@ -642,6 +663,7 @@ export function createApp(store: Store) {
     contract.safewordUsedAt = Date.now();
     contract.resumeUserIds = [];
     await store.updateContract(contract);
+    await resolveOpenLostAlert(contract.id, 'safeword');
     res.json({ contract });
   });
 
@@ -657,6 +679,7 @@ export function createApp(store: Store) {
     contract.pausedByUserId = userId;
     contract.resumeUserIds = [];
     await store.updateContract(contract);
+    await resolveOpenLostAlert(contract.id, 'pause');
     res.json({ contract });
   });
 
@@ -693,6 +716,7 @@ export function createApp(store: Store) {
     contract.status = 'ended';
     contract.resumeUserIds = [];
     await store.updateContract(contract);
+    await resolveOpenLostAlert(contract.id, 'end');
     res.json({ contract });
   });
 
@@ -1315,6 +1339,694 @@ export function createApp(store: Store) {
     checkin.completedAt = Date.now();
     await store.updateScheduledCheckin(checkin);
     res.json({ checkin });
+  });
+
+  // ---- Phase 3: owner commands, routine, wishlist, lost alerts, praise ----
+  // Commands and praise live only inside an active contract and never
+  // override a safeword, a pause, a block, or a contract end. Cage time
+  // is framed as cozy den / quiet time, never as confinement punishment.
+  const COMMAND_KINDS = ['Come home', 'Bedtime', 'Cage time', 'Eat', 'Walk', 'Potty break'];
+  app.post('/api/v1/contracts/:id/commands', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const contract = await loadContract(res, req.params.id, userId);
+    if (!contract) return;
+    if (contract.status !== 'active') {
+      res.status(400).json({ error: 'Commands can only be sent on an active contract.' });
+      return;
+    }
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot send a command to someone you are blocked from.' });
+      return;
+    }
+    if (!(await isOwnerRole(userId))) {
+      res.status(403).json({ error: 'Only the owner side of a contract can send commands.' });
+      return;
+    }
+    const kind = req.body.kind as string | undefined;
+    if (!kind || !COMMAND_KINDS.includes(kind)) {
+      res.status(400).json({ error: 'Command must be one of: Come home, Bedtime, Cage time, Eat, Walk, Potty break.' });
+      return;
+    }
+    const note = typeof req.body.note === 'string' ? req.body.note.trim() : '';
+    if (note.length > 200) {
+      res.status(400).json({ error: 'Command note must be 200 characters or fewer.' });
+      return;
+    }
+    const command = {
+      contractId: contract.id,
+      createdAt: Date.now(),
+      id: newId('command'),
+      kind: kind as OwnerCommandKind,
+      note,
+      recipientUserId: otherParty(contract, userId),
+      respondedAt: null,
+      senderUserId: userId,
+      status: 'sent' as const,
+    };
+    await store.createOwnerCommand(command);
+    res.status(201).json({ command });
+  });
+
+  app.get('/api/v1/contracts/:id/commands', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const contract = await loadContract(res, req.params.id, userId);
+    if (!contract) return;
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot view commands with someone you are blocked from.' });
+      return;
+    }
+    res.json({ commands: await store.ownerCommandsForContract(contract.id) });
+  });
+
+  app.post('/api/v1/commands/:id/respond', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const command = await store.getOwnerCommand(req.params.id);
+    if (!command) {
+      res.status(404).json({ error: 'That command was not found.' });
+      return;
+    }
+    const contract = await store.getContract(command.contractId);
+    if (!contract || !isParticipant(contract, userId)) {
+      res.status(403).json({ error: 'That command is not yours.' });
+      return;
+    }
+    if (command.recipientUserId !== userId) {
+      res.status(403).json({ error: 'Only the pet a command was sent to can respond to it.' });
+      return;
+    }
+    if (command.status !== 'sent') {
+      res.status(400).json({ error: 'That command has already been answered.' });
+      return;
+    }
+    if (contract.status !== 'active') {
+      res.status(400).json({ error: 'Commands can only be answered on an active contract.' });
+      return;
+    }
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot answer a command from someone you are blocked from.' });
+      return;
+    }
+    const status = req.body.status as string | undefined;
+    if (status !== 'done' && status !== 'need-help' && status !== 'passed') {
+      res.status(400).json({ error: 'A command response must be done, need-help, or passed (excused).' });
+      return;
+    }
+    command.status = status;
+    command.respondedAt = Date.now();
+    await store.updateOwnerCommand(command);
+    res.json({ command });
+  });
+
+  // ---- Phase 3: daily pet-care routine ----
+  // A template for the day, not a streak: Eat, Walk, Potty, Nap, Play.
+  // Pass is excused, and nothing punishes a missed or passed item.
+  const ROUTINE_LABELS = ['Eat', 'Walk', 'Potty', 'Nap', 'Play'];
+  app.get('/api/v1/routine', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const date = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+      ? req.query.date
+      : new Date().toISOString().slice(0, 10);
+    res.json({ date, items: await store.routineItemsForUserOnDate(userId, date) });
+  });
+
+  app.post('/api/v1/routine/items', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const date = typeof req.body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.date)
+      ? req.body.date
+      : new Date().toISOString().slice(0, 10);
+    if (Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
+      res.status(400).json({ error: 'Date must be a real YYYY-MM-DD date.' });
+      return;
+    }
+    const label = req.body.label as string | undefined;
+    if (!label || !ROUTINE_LABELS.includes(label)) {
+      res.status(400).json({ error: 'Routine item must be one of: Eat, Walk, Potty, Nap, Play.' });
+      return;
+    }
+    const existing = (await store.routineItemsForUserOnDate(userId, date)).find((r) => r.label === label);
+    if (existing) {
+      res.json({ item: existing });
+      return;
+    }
+    const item = {
+      createdAt: Date.now(),
+      date,
+      id: newId('routine'),
+      label: label as RoutineLabel,
+      status: 'open' as const,
+      userId,
+    };
+    await store.createRoutineItem(item);
+    res.status(201).json({ item });
+  });
+
+  app.post('/api/v1/routine/items/:id/respond', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const item = await store.getRoutineItem(req.params.id);
+    if (!item) {
+      res.status(404).json({ error: 'That routine item was not found.' });
+      return;
+    }
+    if (item.userId !== userId) {
+      res.status(403).json({ error: 'That routine item is not yours.' });
+      return;
+    }
+    if (item.status !== 'open') {
+      res.status(400).json({ error: 'That routine item has already been answered.' });
+      return;
+    }
+    const status = req.body.status as string | undefined;
+    if (status !== 'done' && status !== 'passed') {
+      res.status(400).json({ error: 'A routine item can be marked done or passed (excused).' });
+      return;
+    }
+    item.status = status;
+    await store.updateRoutineItem(item);
+    res.json({ item });
+  });
+
+  // ---- Phase 3: gear wishlist (no purchases) ----
+  // Private by default. No prices, no checkout, no shop links, no
+  // payment of any kind — a wishlist is a list of wants, not a store.
+  const WISHLIST_CATEGORIES = ['collar', 'leash', 'outfit', 'den', 'toy', 'other'];
+  app.get('/api/v1/wishlist', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    res.json({ items: await store.wishlistForUser(userId) });
+  });
+
+  app.post('/api/v1/wishlist', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const label = typeof req.body.label === 'string' ? req.body.label.trim() : '';
+    if (label.length < 1 || label.length > 80) {
+      res.status(400).json({ error: 'Wishlist item must be 1 to 80 characters.' });
+      return;
+    }
+    const category = req.body.category as string | undefined;
+    if (!category || !WISHLIST_CATEGORIES.includes(category)) {
+      res.status(400).json({ error: 'Wishlist category must be one of: collar, leash, outfit, den, toy, other.' });
+      return;
+    }
+    const note = typeof req.body.note === 'string' ? req.body.note.trim() : '';
+    if (note.length > 200) {
+      res.status(400).json({ error: 'Wishlist note must be 200 characters or fewer.' });
+      return;
+    }
+    const item = {
+      category: category as WishlistCategory,
+      createdAt: Date.now(),
+      id: newId('wishlist'),
+      label,
+      note,
+      shared: req.body.shared === true,
+      userId,
+    };
+    await store.createWishlistItem(item);
+    res.status(201).json({ item });
+  });
+
+  app.patch('/api/v1/wishlist/:id', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const item = await store.getWishlistItem(req.params.id);
+    if (!item) {
+      res.status(404).json({ error: 'That wishlist item was not found.' });
+      return;
+    }
+    if (item.userId !== userId) {
+      res.status(403).json({ error: 'That wishlist item is not yours.' });
+      return;
+    }
+    if (typeof req.body.shared !== 'boolean') {
+      res.status(400).json({ error: 'Share must be true or false.' });
+      return;
+    }
+    item.shared = req.body.shared;
+    await store.updateWishlistItem(item);
+    res.json({ item });
+  });
+
+  app.delete('/api/v1/wishlist/:id', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const item = await store.getWishlistItem(req.params.id);
+    if (!item) {
+      res.status(404).json({ error: 'That wishlist item was not found.' });
+      return;
+    }
+    if (item.userId !== userId) {
+      res.status(403).json({ error: 'That wishlist item is not yours.' });
+      return;
+    }
+    await store.deleteWishlistItem(item.id);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/v1/contracts/:id/wishlist', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const contract = await loadContract(res, req.params.id, userId);
+    if (!contract) return;
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot view a wishlist with someone you are blocked from.' });
+      return;
+    }
+    const partnerId = otherParty(contract, userId);
+    const shared = (await store.wishlistForUser(partnerId)).filter((w) => w.shared);
+    res.json({ items: shared });
+  });
+
+  // ---- Phase 3: safe lost-pet mode ----
+  // Safety rules, enforced here and nowhere else: a lost alert carries
+  // only a user-typed general-area label — never a street address,
+  // never a precise location, never an auto-detected location. There
+  // is no geolocation, GPS, or real-time tracking anywhere in Den &
+  // Desk. A helper is never given a location, a phone number, or any
+  // private detail, and is never told to meet the pet in person: their
+  // only action is an in-app message to the original owner, who
+  // decides what happens next. "Brought home" means only that the pet
+  // checked in as home, or the owner marked the alert resolved — never
+  // that a stranger physically retrieved a person. Lost alerts are
+  // visible only to logged-in users, never indexed, and a blocked pair
+  // cannot see or message about each other's alerts. Caught protocol
+  // (also shown in the UI): DO ask first in-app, respect the safeword
+  // instantly, stop if the pet is out of headspace or distressed,
+  // contact the original owner in-app first, and let the original
+  // owner confirm. DO NOT follow, touch without consent, share a photo
+  // or location, approach a pet who is alone and distressed, or
+  // transport a person in a vehicle. A pet's in-app tag shows
+  // pseudonym and pet type only — never a real name, phone, address,
+  // or precise location, and no QR or tag links to a real identity.
+  function generalAreaError(area: string): string | null {
+    if (area.length < 1 || area.length > 60) return 'General area must be 1 to 60 characters, and a general area only — never a street address.';
+    if (/^\d{1,6}\s+\S/.test(area)) return 'That looks like a street address. Use a general area only (for example, a neighbourhood or town).';
+    return null;
+  }
+
+  app.post('/api/v1/contracts/:id/lost', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const contract = await loadContract(res, req.params.id, userId);
+    if (!contract) return;
+    if (contract.status !== 'active') {
+      res.status(400).json({ error: 'Lost mode can only be turned on for an active contract.' });
+      return;
+    }
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot turn on lost mode with someone you are blocked from.' });
+      return;
+    }
+    if (await store.openLostAlertForContract(contract.id)) {
+      res.status(409).json({ error: 'That contract already has an open lost alert.' });
+      return;
+    }
+    const generalArea = typeof req.body.generalArea === 'string' ? req.body.generalArea.trim() : '';
+    const areaError = generalAreaError(generalArea);
+    if (areaError) {
+      res.status(400).json({ error: areaError });
+      return;
+    }
+    // Digital lost poster reward: in-app only. No cash, no payment,
+    // no real contact details on the poster, ever.
+    const LOST_REWARDS = ['badge', 'thank-you', 'treat', 'wishlist-gift'];
+    const reward = typeof req.body.reward === 'string' && LOST_REWARDS.includes(req.body.reward)
+      ? (req.body.reward as LostReward)
+      : typeof req.body.reward === 'string'
+        ? null
+        : ('badge' as LostReward);
+    if (reward === null) {
+      res.status(400).json({ error: 'Reward must be badge, thank-you, treat, or wishlist-gift.' });
+      return;
+    }
+    const creatorProfile = await store.getProfileByUserId(userId);
+    const petUserId = creatorProfile?.role === 'Pet' ? userId : otherParty(contract, userId);
+    const ownerUserId = petUserId === userId ? otherParty(contract, userId) : userId;
+    // Refinement safety rule (safer than the original Phase 3 draft, which
+    // let the owner start lost mode for any active contract pet): lost
+    // mode is separately opt-in by the pet. An owner may only start it
+    // when the pet has opted in. A pet turning lost mode on themselves
+    // counts as opting in at that moment, and the pet can end it
+    // instantly at any time.
+    if (petUserId !== userId && !(await store.getLostOptIn(petUserId))) {
+      res.status(403).json({ error: 'The pet has not opted into lost-game mode, so lost mode cannot be started for them.' });
+      return;
+    }
+    if (petUserId === userId) {
+      await store.setLostOptIn(petUserId, true);
+    }
+    const alert = {
+      contractId: contract.id,
+      createdAt: Date.now(),
+      createdByUserId: userId,
+      foundAt: null,
+      foundByUserId: null,
+      generalArea,
+      id: newId('lost'),
+      ownerUserId,
+      petUserId,
+      resolvedAt: null,
+      resolvedReason: null,
+      reward,
+      status: 'lost' as const,
+    };
+    await store.createLostAlert(alert);
+    res.status(201).json({ alert });
+  });
+
+  app.get('/api/v1/lost', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const open = await store.openLostAlerts();
+    const visible = [];
+    for (const alert of open) {
+      if (await blockedEitherWay(userId, alert.petUserId)) continue;
+      if (await blockedEitherWay(userId, alert.ownerUserId)) continue;
+      const petProfile = await store.getProfileByUserId(alert.petUserId);
+      visible.push({
+        contractId: alert.contractId,
+        createdAt: alert.createdAt,
+        generalArea: alert.generalArea,
+        id: alert.id,
+        ownerUserId: alert.ownerUserId,
+        petDisplayName: petProfile?.displayName ?? 'A pet',
+        petType: petProfile?.petType ?? null,
+        petUserId: alert.petUserId,
+        reward: alert.reward,
+        soundEnabled: await store.getLostSound(alert.petUserId),
+      });
+    }
+    res.json({ alerts: visible });
+  });
+
+  // Lost-game opt-in is separate from any contract: only the pet's own
+  // choice enables lost mode for them. Turning it off also closes any
+  // open alert for that pet at once.
+  app.get('/api/v1/lost-opt-in', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    res.json({ enabled: await store.getLostOptIn(userId) });
+  });
+
+  app.post('/api/v1/lost-opt-in', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    if (typeof req.body.enabled !== 'boolean') {
+      res.status(400).json({ error: 'Enabled must be true or false.' });
+      return;
+    }
+    await store.setLostOptIn(userId, req.body.enabled);
+    if (!req.body.enabled) {
+      const open = (await store.openLostAlerts()).filter((a) => a.petUserId === userId);
+      for (const alert of open) {
+        alert.status = 'resolved';
+        alert.resolvedReason = 'pet-opt-out';
+        alert.resolvedAt = Date.now();
+        await store.updateLostAlert(alert);
+      }
+    }
+    res.json({ enabled: req.body.enabled });
+  });
+
+  // Pet-controlled lost-game sound: the pet can mute it at any time.
+  // A finder sound plays only when this is on AND the finder's own
+  // device toggle is on AND the alert is open AND both are in the
+  // same in-game play area (see game-area endpoints below).
+  app.get('/api/v1/lost-sound', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    res.json({ enabled: await store.getLostSound(userId) });
+  });
+
+  app.post('/api/v1/lost-sound', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    if (typeof req.body.enabled !== 'boolean') {
+      res.status(400).json({ error: 'Enabled must be true or false.' });
+      return;
+    }
+    await store.setLostSound(userId, req.body.enabled);
+    res.json({ enabled: req.body.enabled });
+  });
+
+  // In-game play area only: the user types a play-area label
+  // themselves, or moves their game token to another label. This is
+  // never browser geolocation, GPS, watchPosition, or a real distance.
+  app.get('/api/v1/game-area', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    res.json({ area: await store.getGameToken(userId) });
+  });
+
+  app.post('/api/v1/game-area', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const area = typeof req.body.area === 'string' ? req.body.area.trim() : '';
+    if (area.length < 1 || area.length > 60) {
+      res.status(400).json({ error: 'Play-area label must be 1 to 60 characters.' });
+      return;
+    }
+    await store.setGameToken(userId, area);
+    res.json({ area });
+  });
+
+  // Proximity in game mode only: open lost alerts whose pet's game
+  // token is in the same play-area label as the caller's token.
+  app.get('/api/v1/lost/nearby', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const myArea = await store.getGameToken(userId);
+    if (!myArea) {
+      res.json({ alerts: [] });
+      return;
+    }
+    const open = await store.openLostAlerts();
+    const nearby = [];
+    for (const alert of open) {
+      if (await blockedEitherWay(userId, alert.petUserId)) continue;
+      if (await blockedEitherWay(userId, alert.ownerUserId)) continue;
+      if ((await store.getGameToken(alert.petUserId)) !== myArea) continue;
+      const petProfile = await store.getProfileByUserId(alert.petUserId);
+      nearby.push({
+        contractId: alert.contractId,
+        createdAt: alert.createdAt,
+        generalArea: alert.generalArea,
+        id: alert.id,
+        ownerUserId: alert.ownerUserId,
+        petDisplayName: petProfile?.displayName ?? 'A pet',
+        petType: petProfile?.petType ?? null,
+        petUserId: alert.petUserId,
+        reward: alert.reward,
+        soundEnabled: await store.getLostSound(alert.petUserId),
+      });
+    }
+    res.json({ alerts: nearby });
+  });
+
+  async function loadLostAlert(res: Response, alertId: string, userId: string) {
+    const alert = await store.getLostAlert(alertId);
+    if (!alert) {
+      res.status(404).json({ error: 'That lost alert was not found.' });
+      return null;
+    }
+    const contract = await store.getContract(alert.contractId);
+    if (!contract) {
+      res.status(404).json({ error: 'That lost alert was not found.' });
+      return null;
+    }
+    // Board visibility rules apply to actions too: a blocked pair
+    // cannot act on each other's alerts, except the pet's own escapes
+    // (home/off), which are handled by the callers below before this
+    // check would ever matter for a blocked pet — so keep this strict
+    // for owner resolve and helper messages, and let pet home/off
+    // check the pet identity first in their own handlers.
+    void userId;
+    return { alert, contract };
+  }
+
+  app.post('/api/v1/lost/:id/home', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const alert = await store.getLostAlert(req.params.id);
+    if (!alert) {
+      res.status(404).json({ error: 'That lost alert was not found.' });
+      return;
+    }
+    if (alert.petUserId !== userId) {
+      res.status(403).json({ error: 'Only the pet can check in as home.' });
+      return;
+    }
+    if (alert.status !== 'lost') {
+      res.status(400).json({ error: 'That lost alert is already closed.' });
+      return;
+    }
+    alert.status = 'home';
+    alert.resolvedReason = 'pet-checkin';
+    alert.resolvedAt = Date.now();
+    await store.updateLostAlert(alert);
+    res.json({ alert });
+  });
+
+  app.post('/api/v1/lost/:id/off', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const alert = await store.getLostAlert(req.params.id);
+    if (!alert) {
+      res.status(404).json({ error: 'That lost alert was not found.' });
+      return;
+    }
+    if (alert.petUserId !== userId) {
+      res.status(403).json({ error: 'Only the pet can turn their lost mode off.' });
+      return;
+    }
+    if (alert.status !== 'lost') {
+      res.status(400).json({ error: 'That lost alert is already closed.' });
+      return;
+    }
+    alert.status = 'resolved';
+    alert.resolvedReason = 'pet-off';
+    alert.resolvedAt = Date.now();
+    await store.updateLostAlert(alert);
+    res.json({ alert });
+  });
+
+  app.post('/api/v1/lost/:id/resolve', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const found = await loadLostAlert(res, req.params.id, userId);
+    if (!found) return;
+    const { alert } = found;
+    if (alert.ownerUserId !== userId) {
+      res.status(403).json({ error: 'Only the original owner can mark a lost alert resolved.' });
+      return;
+    }
+    if (alert.status !== 'lost') {
+      res.status(400).json({ error: 'That lost alert is already closed.' });
+      return;
+    }
+    if (await blockedEitherWay(userId, alert.petUserId)) {
+      res.status(403).json({ error: 'You cannot resolve a lost alert with someone you are blocked from.' });
+      return;
+    }
+    alert.status = 'resolved';
+    alert.resolvedReason = 'owner-resolved';
+    alert.resolvedAt = Date.now();
+    await store.updateLostAlert(alert);
+    res.json({ alert });
+  });
+
+  // A helper marking "found" is an in-app flag only. It does not close
+  // the alert, share any location or private detail, or authorise
+  // meeting or transport. The owner still confirms (resolve) and the
+  // pet still checks in as home. "Transported home" in this app means
+  // only: found marked in-app, owner confirmed, pet checked in as home.
+  // The original owner, or the pet themselves, is the only person who
+  // physically moves the pet, and only if already agreed separately.
+  app.post('/api/v1/lost/:id/found', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const found = await loadLostAlert(res, req.params.id, userId);
+    if (!found) return;
+    const { alert } = found;
+    if (alert.status !== 'lost') {
+      res.status(400).json({ error: 'That lost alert is already closed.' });
+      return;
+    }
+    if (alert.petUserId === userId || alert.ownerUserId === userId) {
+      res.status(400).json({ error: 'The pet and owner use home and resolve for this alert; found is for a helper.' });
+      return;
+    }
+    if (await blockedEitherWay(userId, alert.ownerUserId) || await blockedEitherWay(userId, alert.petUserId)) {
+      res.status(403).json({ error: 'You cannot mark found on a lost alert with someone you are blocked from.' });
+      return;
+    }
+    if (alert.foundByUserId) {
+      res.status(409).json({ error: 'That lost alert is already marked found in-app.' });
+      return;
+    }
+    alert.foundByUserId = userId;
+    alert.foundAt = Date.now();
+    await store.updateLostAlert(alert);
+    // Finder action, unchanged by the poster refinement: tapping
+    // "I think I found them" sends an in-app message to the original
+    // owner only — no location, no contact details, no meeting, no
+    // transport. The owner confirms and the pet checks in as home.
+    await store.addMessage({
+      body: 'I think I found them — marked found in-app only. I have no location or contact details for the pet, and I will not meet, follow, or transport anyone. Please confirm in-app.',
+      createdAt: Date.now(),
+      id: newId('msg'),
+      readAt: null,
+      recipientUserId: alert.ownerUserId,
+      senderUserId: userId,
+    });
+    res.json({ alert: { foundAt: alert.foundAt, foundByUserId: alert.foundByUserId, id: alert.id, status: alert.status } });
+  });
+
+  app.post('/api/v1/lost/:id/message', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const found = await loadLostAlert(res, req.params.id, userId);
+    if (!found) return;
+    const { alert } = found;
+    if (alert.status !== 'lost') {
+      res.status(400).json({ error: 'That lost alert is already closed.' });
+      return;
+    }
+    if (await blockedEitherWay(userId, alert.ownerUserId) || await blockedEitherWay(userId, alert.petUserId)) {
+      res.status(403).json({ error: 'You cannot message about a lost alert with someone you are blocked from.' });
+      return;
+    }
+    const body = typeof req.body.body === 'string' ? req.body.body : '';
+    if (body.trim().length < 1 || body.length > 2000) {
+      res.status(400).json({ error: 'Message must be 1 to 2000 characters.' });
+      return;
+    }
+    // The helper is told nothing private: no location, no phone, no
+    // address. This is an ordinary in-app message to the owner, who
+    // decides what happens next. Never meet a stranger in person
+    // because of a lost alert.
+    const message = {
+      body,
+      createdAt: Date.now(),
+      id: newId('message'),
+      readAt: null,
+      recipientUserId: alert.ownerUserId,
+      senderUserId: userId,
+    };
+    await store.addMessage(message);
+    res.status(201).json({ message });
+  });
+
+  // ---- Phase 3: good/bad praise, private between the pair ----
+  app.post('/api/v1/contracts/:id/praise', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const contract = await loadContract(res, req.params.id, userId);
+    if (!contract) return;
+    if (contract.status !== 'active') {
+      res.status(400).json({ error: 'Praise can only be sent on an active contract.' });
+      return;
+    }
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot send praise to someone you are blocked from.' });
+      return;
+    }
+    if (!(await isOwnerRole(userId))) {
+      res.status(403).json({ error: 'Only the owner side of a contract can send praise or correction notes.' });
+      return;
+    }
+    const kind = req.body.kind as string | undefined;
+    if (kind !== 'praise' && kind !== 'correction') {
+      res.status(400).json({ error: 'Praise kind must be praise or correction.' });
+      return;
+    }
+    const text = typeof req.body.text === 'string' ? req.body.text.trim() : '';
+    if (text.length < 1 || text.length > 200) {
+      res.status(400).json({ error: 'Praise text must be 1 to 200 characters.' });
+      return;
+    }
+    const note = {
+      contractId: contract.id,
+      createdAt: Date.now(),
+      id: newId('praise'),
+      kind: kind as 'praise' | 'correction',
+      recipientUserId: otherParty(contract, userId),
+      senderUserId: userId,
+      text,
+    };
+    await store.createPraiseNote(note);
+    res.status(201).json({ note });
+  });
+
+  app.get('/api/v1/contracts/:id/praise', requireAuth, async (req, res) => {
+    const userId = (req as Request & { userId: string }).userId;
+    const contract = await loadContract(res, req.params.id, userId);
+    if (!contract) return;
+    if (await blockedPair(contract)) {
+      res.status(403).json({ error: 'You cannot view praise with someone you are blocked from.' });
+      return;
+    }
+    res.json({ notes: await store.praiseNotesForContract(contract.id) });
   });
 
   return app;

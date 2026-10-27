@@ -171,6 +171,79 @@ export interface ScheduledCheckin {
   createdAt: number;
 }
 
+/** Phase 3: owner commands, daily routine, gear wishlist, safe lost-pet
+ *  alerts, and private praise. None of these types carries a precise
+ *  location, a phone number, a price, or a payment reference — by
+ *  design. Lost alerts carry only a user-typed general-area label. */
+export type OwnerCommandKind = 'Come home' | 'Bedtime' | 'Cage time' | 'Eat' | 'Walk' | 'Potty break';
+export type OwnerCommandStatus = 'sent' | 'done' | 'need-help' | 'passed';
+export interface OwnerCommand {
+  id: string;
+  contractId: string;
+  senderUserId: string;
+  recipientUserId: string;
+  kind: OwnerCommandKind;
+  note: string;
+  status: OwnerCommandStatus;
+  createdAt: number;
+  respondedAt: number | null;
+}
+export type RoutineLabel = 'Eat' | 'Walk' | 'Potty' | 'Nap' | 'Play';
+export type RoutineStatus = 'open' | 'done' | 'passed';
+export interface RoutineItem {
+  id: string;
+  userId: string;
+  date: string;
+  label: RoutineLabel;
+  status: RoutineStatus;
+  createdAt: number;
+}
+export type WishlistCategory = 'collar' | 'leash' | 'outfit' | 'den' | 'toy' | 'other';
+export interface WishlistItem {
+  id: string;
+  userId: string;
+  label: string;
+  category: WishlistCategory;
+  note: string;
+  shared: boolean;
+  createdAt: number;
+}
+export type LostAlertStatus = 'lost' | 'home' | 'resolved';
+export type LostReward = 'badge' | 'thank-you' | 'treat' | 'wishlist-gift';
+export interface LostAlert {
+  id: string;
+  contractId: string;
+  petUserId: string;
+  ownerUserId: string;
+  createdByUserId: string;
+  generalArea: string;
+  status: LostAlertStatus;
+  resolvedReason: string | null;
+  createdAt: number;
+  resolvedAt: number | null;
+  // "Found" is an in-app flag only: a helper marking found does not
+  // change the alert status, share any location, or authorise meeting
+  // or transport. Only the owner resolving, or the pet checking in as
+  // home, closes the alert.
+  foundByUserId: string | null;
+  foundAt: number | null;
+  // Reward is in-app only: a Good Finder badge/sticker, a thank-you
+  // note, a treat for the finder's own pet, or a wishlist gift between
+  // people who already know each other. Never cash, never a payment,
+  // never real contact details.
+  reward: LostReward;
+}
+export type PraiseKind = 'praise' | 'correction';
+export interface PraiseNote {
+  id: string;
+  contractId: string;
+  senderUserId: string;
+  recipientUserId: string;
+  kind: PraiseKind;
+  text: string;
+  createdAt: number;
+}
+
 /** Trust badge tiers, computed only from mutual ratings (see trustSummary).
  *  A rating counts only when the other person has also rated you back.
  *  This is the Phase 1 subset of the Once Upon a Little mutual-rating
@@ -248,6 +321,36 @@ export interface Store {
   getScheduledCheckin(id: string): Promise<ScheduledCheckin | undefined>;
   updateScheduledCheckin(checkin: ScheduledCheckin): Promise<void>;
   scheduledCheckinsForContract(contractId: string): Promise<ScheduledCheckin[]>;
+  // Phase 3: commands, routine, wishlist, lost alerts, praise.
+  createOwnerCommand(command: OwnerCommand): Promise<void>;
+  getOwnerCommand(id: string): Promise<OwnerCommand | undefined>;
+  updateOwnerCommand(command: OwnerCommand): Promise<void>;
+  ownerCommandsForContract(contractId: string): Promise<OwnerCommand[]>;
+  createRoutineItem(item: RoutineItem): Promise<void>;
+  routineItemsForUserOnDate(userId: string, date: string): Promise<RoutineItem[]>;
+  getRoutineItem(id: string): Promise<RoutineItem | undefined>;
+  updateRoutineItem(item: RoutineItem): Promise<void>;
+  createWishlistItem(item: WishlistItem): Promise<void>;
+  wishlistForUser(userId: string): Promise<WishlistItem[]>;
+  getWishlistItem(id: string): Promise<WishlistItem | undefined>;
+  updateWishlistItem(item: WishlistItem): Promise<void>;
+  deleteWishlistItem(id: string): Promise<void>;
+  createLostAlert(alert: LostAlert): Promise<void>;
+  getLostAlert(id: string): Promise<LostAlert | undefined>;
+  updateLostAlert(alert: LostAlert): Promise<void>;
+  openLostAlertForContract(contractId: string): Promise<LostAlert | undefined>;
+  openLostAlerts(): Promise<LostAlert[]>;
+  getLostOptIn(userId: string): Promise<boolean>;
+  setLostOptIn(userId: string, enabled: boolean): Promise<void>;
+  getLostSound(userId: string): Promise<boolean>;
+  setLostSound(userId: string, enabled: boolean): Promise<void>;
+  // In-game play-area token: a typed label the user chose themselves
+  // (e.g. "Forest clearing"). It is NOT a real location and is never
+  // derived from geolocation or real distance.
+  setGameToken(userId: string, area: string): Promise<void>;
+  getGameToken(userId: string): Promise<string | null>;
+  createPraiseNote(note: PraiseNote): Promise<void>;
+  praiseNotesForContract(contractId: string): Promise<PraiseNote[]>;
   reset(): Promise<void>;
 }
 
@@ -285,6 +388,14 @@ export class InMemoryStore implements Store {
   private aftercareCheckins: AftercareCheckin[] = [];
   private videoHellos: VideoHello[] = [];
   private scheduledCheckins: ScheduledCheckin[] = [];
+  private ownerCommands: OwnerCommand[] = [];
+  private routineItems: RoutineItem[] = [];
+  private wishlistItems: WishlistItem[] = [];
+  private lostAlerts: LostAlert[] = [];
+  private lostOptIns = new Map<string, boolean>();
+  private lostSounds = new Map<string, boolean>();
+  private gameTokens = new Map<string, string>();
+  private praiseNotes: PraiseNote[] = [];
 
   constructor(inviteCodes: string[]) {
     for (const code of inviteCodes) this.invites.set(code, null);
@@ -506,6 +617,88 @@ export class InMemoryStore implements Store {
   async scheduledCheckinsForContract(contractId: string) {
     return this.scheduledCheckins.filter((c) => c.contractId === contractId);
   }
+  async createOwnerCommand(command: OwnerCommand) {
+    this.ownerCommands.push(command);
+  }
+  async getOwnerCommand(id: string) {
+    return this.ownerCommands.find((c) => c.id === id);
+  }
+  async updateOwnerCommand(command: OwnerCommand) {
+    const i = this.ownerCommands.findIndex((c) => c.id === command.id);
+    if (i >= 0) this.ownerCommands[i] = command;
+  }
+  async ownerCommandsForContract(contractId: string) {
+    return this.ownerCommands.filter((c) => c.contractId === contractId);
+  }
+  async createRoutineItem(item: RoutineItem) {
+    this.routineItems.push(item);
+  }
+  async routineItemsForUserOnDate(userId: string, date: string) {
+    return this.routineItems.filter((r) => r.userId === userId && r.date === date);
+  }
+  async getRoutineItem(id: string) {
+    return this.routineItems.find((r) => r.id === id);
+  }
+  async updateRoutineItem(item: RoutineItem) {
+    const i = this.routineItems.findIndex((r) => r.id === item.id);
+    if (i >= 0) this.routineItems[i] = item;
+  }
+  async createWishlistItem(item: WishlistItem) {
+    this.wishlistItems.push(item);
+  }
+  async wishlistForUser(userId: string) {
+    return this.wishlistItems.filter((w) => w.userId === userId);
+  }
+  async getWishlistItem(id: string) {
+    return this.wishlistItems.find((w) => w.id === id);
+  }
+  async updateWishlistItem(item: WishlistItem) {
+    const i = this.wishlistItems.findIndex((w) => w.id === item.id);
+    if (i >= 0) this.wishlistItems[i] = item;
+  }
+  async deleteWishlistItem(id: string) {
+    this.wishlistItems = this.wishlistItems.filter((w) => w.id !== id);
+  }
+  async createLostAlert(alert: LostAlert) {
+    this.lostAlerts.push(alert);
+  }
+  async getLostAlert(id: string) {
+    return this.lostAlerts.find((a) => a.id === id);
+  }
+  async updateLostAlert(alert: LostAlert) {
+    const i = this.lostAlerts.findIndex((a) => a.id === alert.id);
+    if (i >= 0) this.lostAlerts[i] = alert;
+  }
+  async openLostAlertForContract(contractId: string) {
+    return this.lostAlerts.find((a) => a.contractId === contractId && a.status === 'lost');
+  }
+  async openLostAlerts() {
+    return this.lostAlerts.filter((a) => a.status === 'lost');
+  }
+  async getLostOptIn(userId: string) {
+    return this.lostOptIns.get(userId) ?? false;
+  }
+  async setLostOptIn(userId: string, enabled: boolean) {
+    this.lostOptIns.set(userId, enabled);
+  }
+  async getLostSound(userId: string) {
+    return this.lostSounds.get(userId) ?? true;
+  }
+  async setLostSound(userId: string, enabled: boolean) {
+    this.lostSounds.set(userId, enabled);
+  }
+  async setGameToken(userId: string, area: string) {
+    this.gameTokens.set(userId, area);
+  }
+  async getGameToken(userId: string) {
+    return this.gameTokens.get(userId) ?? null;
+  }
+  async createPraiseNote(note: PraiseNote) {
+    this.praiseNotes.push(note);
+  }
+  async praiseNotesForContract(contractId: string) {
+    return this.praiseNotes.filter((p) => p.contractId === contractId);
+  }
   async reset() {
     this.users.clear();
     this.profiles.clear();
@@ -524,6 +717,14 @@ export class InMemoryStore implements Store {
     this.aftercareCheckins = [];
     this.videoHellos = [];
     this.scheduledCheckins = [];
+    this.ownerCommands = [];
+    this.routineItems = [];
+    this.wishlistItems = [];
+    this.lostAlerts = [];
+    this.lostOptIns.clear();
+    this.lostSounds.clear();
+    this.gameTokens.clear();
+    this.praiseNotes = [];
     for (const key of this.invites.keys()) this.invites.set(key, null);
   }
 }

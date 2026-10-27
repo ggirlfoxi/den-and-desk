@@ -566,3 +566,349 @@ describe('Den & Desk API, Phase 2', () => {
     expect(blockedContract.status).toBe(403);
   });
 });
+
+describe('Den & Desk API, Phase 3', () => {
+  beforeEach(async () => {
+    await store.reset();
+    delete process.env.MODERATOR_EMAILS;
+  });
+
+  async function signupProfile3(
+    email: string,
+    invite: string,
+    profile: { displayName: string; petType: string | null; role: string },
+  ) {
+    const user = await signup(email, invite);
+    const res = await request(app)
+      .post('/api/v1/profiles')
+      .set('Authorization', `Bearer ${user.token}`)
+      .send(profile);
+    expect(res.status).toBe(201);
+    return { ...user, profile: res.body.profile as { id: string; userId: string } };
+  }
+
+  async function activeContract3(a: { token: string; user: { id: string } }, b: { token: string; user: { id: string } }) {
+    const created = await request(app)
+      .post('/api/v1/contracts')
+      .set('Authorization', `Bearer ${a.token}`)
+      .send({ limits: 'Kindness first.', partnerUserId: b.user.id, safeword: 'red', title: 'Our agreement' });
+    expect(created.status).toBe(201);
+    const id = created.body.contract.id as string;
+    await request(app).post(`/api/v1/contracts/${id}/sign`).set('Authorization', `Bearer ${a.token}`);
+    const signB = await request(app).post(`/api/v1/contracts/${id}/sign`).set('Authorization', `Bearer ${b.token}`);
+    expect(signB.body.contract.status).toBe('active');
+    return id;
+  }
+
+  async function pair() {
+    const owner = await signupProfile3('p3o@example.com', 'DEN-WELCOME-2026', { displayName: 'Rowan', petType: null, role: 'Owner' });
+    const pet = await signupProfile3('p3k@example.com', 'DEN-SECOND-2026', { displayName: 'Moss', petType: 'Kitty', role: 'Pet' });
+    const contractId = await activeContract3(owner, pet);
+    return { contractId, owner, pet };
+  }
+
+  it('sends owner commands and lets the pet answer Done, Need help, or Pass', async () => {
+    const { contractId, owner, pet } = await pair();
+    const badKind = await request(app)
+      .post(`/api/v1/contracts/${contractId}/commands`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ kind: 'Teleport' });
+    expect(badKind.status).toBe(400);
+    const petSend = await request(app)
+      .post(`/api/v1/contracts/${contractId}/commands`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ kind: 'Eat' });
+    expect(petSend.status).toBe(403);
+    const command = await request(app)
+      .post(`/api/v1/contracts/${contractId}/commands`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ kind: 'Come home', note: 'Time to come home, please.' });
+    expect(command.status).toBe(201);
+    expect(command.body.command.status).toBe('sent');
+    const commandId = command.body.command.id as string;
+    const ownerAnswer = await request(app)
+      .post(`/api/v1/commands/${commandId}/respond`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ status: 'done' });
+    expect(ownerAnswer.status).toBe(403);
+    const answered = await request(app)
+      .post(`/api/v1/commands/${commandId}/respond`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ status: 'done' });
+    expect(answered.body.command.status).toBe('done');
+    const again = await request(app)
+      .post(`/api/v1/commands/${commandId}/respond`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ status: 'passed' });
+    expect(again.status).toBe(400);
+    const list = await request(app).get(`/api/v1/contracts/${contractId}/commands`).set('Authorization', `Bearer ${pet.token}`);
+    expect(list.body.commands).toHaveLength(1);
+  });
+
+  it('runs the daily routine template with Pass excused and no streak', async () => {
+    const { pet } = await pair();
+    const date = '2026-10-27';
+    for (const label of ['Eat', 'Walk', 'Potty', 'Nap', 'Play']) {
+      const created = await request(app)
+        .post('/api/v1/routine/items')
+        .set('Authorization', `Bearer ${pet.token}`)
+        .send({ date, label });
+      expect(created.status).toBe(201);
+    }
+    const duplicate = await request(app)
+      .post('/api/v1/routine/items')
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ date, label: 'Eat' });
+    expect(duplicate.status).toBe(200);
+    const badLabel = await request(app)
+      .post('/api/v1/routine/items')
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ date, label: 'Teleport' });
+    expect(badLabel.status).toBe(400);
+    const list = await request(app).get(`/api/v1/routine?date=${date}`).set('Authorization', `Bearer ${pet.token}`);
+    expect(list.body.items).toHaveLength(5);
+    const firstId = list.body.items[0].id as string;
+    const passed = await request(app)
+      .post(`/api/v1/routine/items/${firstId}/respond`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ status: 'passed' });
+    expect(passed.body.item.status).toBe('passed');
+  });
+
+  it('adds, shares, and removes wishlist items with no prices or shop links', async () => {
+    const { contractId, owner, pet } = await pair();
+    const item = await request(app)
+      .post('/api/v1/wishlist')
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ category: 'collar', label: 'Soft rose collar', note: 'Breakaway, please.' });
+    expect(item.status).toBe(201);
+    expect(item.body.item.shared).toBe(false);
+    expect(JSON.stringify(item.body)).not.toMatch(/price|checkout|stripe|http/);
+    const itemId = item.body.item.id as string;
+    const partnerBefore = await request(app)
+      .get(`/api/v1/contracts/${contractId}/wishlist`)
+      .set('Authorization', `Bearer ${owner.token}`);
+    expect(partnerBefore.body.items).toHaveLength(0);
+    const shared = await request(app)
+      .patch(`/api/v1/wishlist/${itemId}`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ shared: true });
+    expect(shared.body.item.shared).toBe(true);
+    const partnerAfter = await request(app)
+      .get(`/api/v1/contracts/${contractId}/wishlist`)
+      .set('Authorization', `Bearer ${owner.token}`);
+    expect(partnerAfter.body.items).toHaveLength(1);
+    const removed = await request(app).delete(`/api/v1/wishlist/${itemId}`).set('Authorization', `Bearer ${pet.token}`);
+    expect(removed.status).toBe(200);
+    const mine = await request(app).get('/api/v1/wishlist').set('Authorization', `Bearer ${pet.token}`);
+    expect(mine.body.items).toHaveLength(0);
+  });
+
+  it('runs safe lost mode: board shows pseudonym only, pet can end it, safeword ends it, helpers only message the owner', async () => {
+    const { contractId, owner, pet } = await pair();
+    const helper = await signupProfile3('p3h@example.com', 'DEN-THIRD-2026', { displayName: 'Fern', petType: null, role: 'Curious' });
+    const optIn = await request(app)
+      .post('/api/v1/lost-opt-in')
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ enabled: true });
+    expect(optIn.body.enabled).toBe(true);
+    const street = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: '123 Main Street' });
+    expect(street.status).toBe(400);
+    const alert = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    expect(alert.status).toBe(201);
+    expect(alert.body.alert.generalArea).toBe('Tri-Cities');
+    expect(JSON.stringify(alert.body)).not.toMatch(/latitude|longitude|gps|geolocation|watchPosition/);
+    const alertId = alert.body.alert.id as string;
+    const second = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ generalArea: 'Elsewhere' });
+    expect(second.status).toBe(409);
+    const board = await request(app).get('/api/v1/lost').set('Authorization', `Bearer ${helper.token}`);
+    expect(board.body.alerts).toHaveLength(1);
+    expect(board.body.alerts[0].petDisplayName).toBe('Moss');
+    expect(board.body.alerts[0].petType).toBe('Kitty');
+    expect(JSON.stringify(board.body)).not.toMatch(/phone|latitude|longitude/);
+    const helperMessage = await request(app)
+      .post(`/api/v1/lost/${alertId}/message`)
+      .set('Authorization', `Bearer ${helper.token}`)
+      .send({ body: 'I may have information — please message me back here.' });
+    expect(helperMessage.status).toBe(201);
+    const ownerCannotHome = await request(app)
+      .post(`/api/v1/lost/${alertId}/home`)
+      .set('Authorization', `Bearer ${owner.token}`);
+    expect(ownerCannotHome.status).toBe(403);
+    const home = await request(app).post(`/api/v1/lost/${alertId}/home`).set('Authorization', `Bearer ${pet.token}`);
+    expect(home.body.alert.status).toBe('home');
+    expect(home.body.alert.resolvedReason).toBe('pet-checkin');
+    const boardAfter = await request(app).get('/api/v1/lost').set('Authorization', `Bearer ${helper.token}`);
+    expect(boardAfter.body.alerts).toHaveLength(0);
+
+    const alert2 = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    expect(alert2.status).toBe(201);
+    const stopped = await request(app).post(`/api/v1/contracts/${contractId}/safeword`).set('Authorization', `Bearer ${pet.token}`);
+    expect(stopped.body.contract.status).toBe('paused');
+    const boardAfterSafeword = await request(app).get('/api/v1/lost').set('Authorization', `Bearer ${helper.token}`);
+    expect(boardAfterSafeword.body.alerts).toHaveLength(0);
+  });
+
+  it('requires the pet opt-in before an owner can start lost mode, and lets a helper mark found in-app only', async () => {
+    const { contractId, owner, pet } = await pair();
+    const helper = await signupProfile3('p3h2@example.com', 'DEN-THIRD-2026', { displayName: 'Fern', petType: null, role: 'Curious' });
+    const withoutOptIn = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    expect(withoutOptIn.status).toBe(403);
+    await request(app).post('/api/v1/lost-opt-in').set('Authorization', `Bearer ${pet.token}`).send({ enabled: true });
+    const alert = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    expect(alert.status).toBe(201);
+    const alertId = alert.body.alert.id as string;
+    const found = await request(app).post(`/api/v1/lost/${alertId}/found`).set('Authorization', `Bearer ${helper.token}`);
+    expect(found.status).toBe(200);
+    expect(found.body.alert.status).toBe('lost');
+    expect(found.body.alert.foundByUserId).toBe(helper.user.id);
+    const board = await request(app).get('/api/v1/lost').set('Authorization', `Bearer ${helper.token}`);
+    expect(board.body.alerts).toHaveLength(1);
+    expect(board.body.alerts[0]).not.toHaveProperty('foundByUserId');
+    const ownerResolve = await request(app).post(`/api/v1/lost/${alertId}/resolve`).set('Authorization', `Bearer ${owner.token}`);
+    expect(ownerResolve.body.alert.status).toBe('resolved');
+    expect(ownerResolve.body.alert.resolvedReason).toBe('owner-resolved');
+  });
+
+  it('lets the pet turn lost-game opt-in off, closing open alerts at once', async () => {
+    const { contractId, owner, pet } = await pair();
+    await request(app).post('/api/v1/lost-opt-in').set('Authorization', `Bearer ${pet.token}`).send({ enabled: true });
+    const alert = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    expect(alert.status).toBe(201);
+    const off = await request(app).post('/api/v1/lost-opt-in').set('Authorization', `Bearer ${pet.token}`).send({ enabled: false });
+    expect(off.body.enabled).toBe(false);
+    const board = await request(app).get('/api/v1/lost').set('Authorization', `Bearer ${owner.token}`);
+    expect(board.body.alerts).toHaveLength(0);
+  });
+
+  it('generates a poster with only pseudonym, pet type, general area, and an in-app-only reward', async () => {
+    const { contractId, owner, pet } = await pair();
+    await request(app).post('/api/v1/lost-opt-in').set('Authorization', `Bearer ${pet.token}`).send({ enabled: true });
+    const badReward = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities', reward: 'cash' });
+    expect(badReward.status).toBe(400);
+    const alert = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities', reward: 'treat' });
+    expect(alert.status).toBe(201);
+    expect(alert.body.alert.reward).toBe('treat');
+    const helper = await signupProfile3('p3p@example.com', 'DEN-THIRD-2026', { displayName: 'Fern', petType: null, role: 'Curious' });
+    const board = await request(app).get('/api/v1/lost').set('Authorization', `Bearer ${helper.token}`);
+    expect(board.body.alerts).toHaveLength(1);
+    const poster = board.body.alerts[0];
+    expect(poster.petDisplayName).toBe('Moss');
+    expect(poster.petType).toBe('Kitty');
+    expect(poster.generalArea).toBe('Tri-Cities');
+    expect(poster.reward).toBe('treat');
+    expect(poster.soundEnabled).toBe(true);
+    expect(JSON.stringify(poster)).not.toMatch(/phone|latitude|longitude|gps|geolocation/i);
+  });
+
+  it('lets the pet mute the lost-game sound, and matches proximity only by shared in-game play-area label', async () => {
+    const { contractId, owner, pet } = await pair();
+    await request(app).post('/api/v1/lost-opt-in').set('Authorization', `Bearer ${pet.token}`).send({ enabled: true });
+    const helper = await signupProfile3('p3g@example.com', 'DEN-THIRD-2026', { displayName: 'Fern', petType: null, role: 'Curious' });
+    const alert = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    expect(alert.status).toBe(201);
+    const empty = await request(app).get('/api/v1/lost/nearby').set('Authorization', `Bearer ${helper.token}`);
+    expect(empty.body.alerts).toHaveLength(0);
+    await request(app).post('/api/v1/game-area').set('Authorization', `Bearer ${pet.token}`).send({ area: 'Forest clearing' });
+    await request(app).post('/api/v1/game-area').set('Authorization', `Bearer ${helper.token}`).send({ area: 'Meadow' });
+    const different = await request(app).get('/api/v1/lost/nearby').set('Authorization', `Bearer ${helper.token}`);
+    expect(different.body.alerts).toHaveLength(0);
+    await request(app).post('/api/v1/game-area').set('Authorization', `Bearer ${helper.token}`).send({ area: 'Forest clearing' });
+    const nearby = await request(app).get('/api/v1/lost/nearby').set('Authorization', `Bearer ${helper.token}`);
+    expect(nearby.body.alerts).toHaveLength(1);
+    expect(nearby.body.alerts[0].soundEnabled).toBe(true);
+    await request(app).post('/api/v1/lost-sound').set('Authorization', `Bearer ${pet.token}`).send({ enabled: false });
+    const muted = await request(app).get('/api/v1/lost/nearby').set('Authorization', `Bearer ${helper.token}`);
+    expect(muted.body.alerts[0].soundEnabled).toBe(false);
+  });
+
+  it('sends an in-app message to the owner only when a helper taps I think I found them', async () => {
+    const { contractId, owner, pet } = await pair();
+    await request(app).post('/api/v1/lost-opt-in').set('Authorization', `Bearer ${pet.token}`).send({ enabled: true });
+    const helper = await signupProfile3('p3f@example.com', 'DEN-THIRD-2026', { displayName: 'Fern', petType: null, role: 'Curious' });
+    const alert = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    const found = await request(app).post(`/api/v1/lost/${alert.body.alert.id}/found`).set('Authorization', `Bearer ${helper.token}`);
+    expect(found.status).toBe(200);
+    const threads = await request(app).get('/api/v1/messages/threads').set('Authorization', `Bearer ${owner.token}`);
+    const thread = threads.body.threads.find((t: { partnerUserId: string }) => t.partnerUserId === helper.user.id);
+    expect(thread).toBeDefined();
+    expect(thread.lastMessage.body).toMatch(/found in-app/);
+    expect(thread.lastMessage.body).toMatch(/will not meet/);
+  });
+
+  it('blocks lost-alert interaction between blocked users, while the pet can still turn lost mode off', async () => {
+    const { contractId, owner, pet } = await pair();
+    await request(app).post('/api/v1/lost-opt-in').set('Authorization', `Bearer ${pet.token}`).send({ enabled: true });
+    const alert = await request(app)
+      .post(`/api/v1/contracts/${contractId}/lost`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ generalArea: 'Tri-Cities' });
+    const alertId = alert.body.alert.id as string;
+    await request(app).post('/api/v1/blocks').set('Authorization', `Bearer ${owner.token}`).send({ blockedUserId: pet.user.id });
+    const board = await request(app).get('/api/v1/lost').set('Authorization', `Bearer ${owner.token}`);
+    expect(board.body.alerts).toHaveLength(0);
+    const resolveBlocked = await request(app)
+      .post(`/api/v1/lost/${alertId}/resolve`)
+      .set('Authorization', `Bearer ${owner.token}`);
+    expect(resolveBlocked.status).toBe(403);
+    const petOff = await request(app).post(`/api/v1/lost/${alertId}/off`).set('Authorization', `Bearer ${pet.token}`);
+    expect(petOff.body.alert.status).toBe('resolved');
+    expect(petOff.body.alert.resolvedReason).toBe('pet-off');
+  });
+
+  it('sends private praise and correction notes inside an active contract only', async () => {
+    const { contractId, owner, pet } = await pair();
+    const note = await request(app)
+      .post(`/api/v1/contracts/${contractId}/praise`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ kind: 'praise', text: 'Good kitten' });
+    expect(note.status).toBe(201);
+    const petSend = await request(app)
+      .post(`/api/v1/contracts/${contractId}/praise`)
+      .set('Authorization', `Bearer ${pet.token}`)
+      .send({ kind: 'praise', text: 'Good owner' });
+    expect(petSend.status).toBe(403);
+    const list = await request(app).get(`/api/v1/contracts/${contractId}/praise`).set('Authorization', `Bearer ${pet.token}`);
+    expect(list.body.notes).toHaveLength(1);
+    expect(list.body.notes[0].text).toBe('Good kitten');
+    await request(app).post(`/api/v1/contracts/${contractId}/end`).set('Authorization', `Bearer ${owner.token}`);
+    const afterEnd = await request(app)
+      .post(`/api/v1/contracts/${contractId}/praise`)
+      .set('Authorization', `Bearer ${owner.token}`)
+      .send({ kind: 'correction', text: 'Too late' });
+    expect(afterEnd.status).toBe(400);
+  });
+});
